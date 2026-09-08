@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="640" viewBox="0 0 1440 640" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">OpenCode Workflow Engine — Think in flows.</title>
+  <desc id="description">An editorial illustration of a script branching into three independent review agents, then collecting their results. Parallel agents, verified handoffs, and progress you can resume.</desc>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1440" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FCFAF5"/>
+      <stop offset="1" stop-color="#F1F0EB"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="64" y1="250" x2="619" y2="380" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#BC622C"/>
+      <stop offset="1" stop-color="#B74B36"/>
+    </linearGradient>
+    <linearGradient id="inbound" x1="842" y1="324" x2="963" y2="324" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B86C38"/>
+      <stop offset="1" stop-color="#7392A5"/>
+    </linearGradient>
+    <linearGradient id="outbound" x1="1197" y1="324" x2="1291" y2="324" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7392A5"/>
+      <stop offset="1" stop-color="#35627B"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="1" y="1" width="1438" height="638" rx="24" fill="url(#paper)" stroke="#D9D7D0" stroke-width="2"/>
+  <path d="M64 115H1376" stroke="#D8D6D0"/>
+  <path d="M64 543H1376" stroke="#D8D6D0"/>
+
+  <g font-family="Arial, Helvetica, 'Liberation Sans', sans-serif">
+    <!-- A compact branching mark, repeated in the orchestration below. -->
+    <g stroke="#A95B30" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M66 79H78C85 79 84 67 91 67H101M78 79H101M78 79C85 79 84 91 91 91H101"/>
+      <circle cx="105" cy="67" r="3" fill="#A95B30" stroke="none"/>
+      <circle cx="105" cy="79" r="3" fill="#A95B30" stroke="none"/>
+      <circle cx="105" cy="91" r="3" fill="#A95B30" stroke="none"/>
+    </g>
+    <text x="129" y="86" fill="#282D32" font-size="20" font-weight="700" letter-spacing="2.3">OPEN CODE <tspan fill="#8A8C8D">/</tspan> WORKFLOW ENGINE</text>
+    <text x="1375" y="85" text-anchor="end" fill="#646D74" font-family="'Courier New', 'Liberation Mono', monospace" font-size="18">v0.1.0</text>
+
+    <text x="61" y="254" fill="#242C33" font-size="142" font-weight="700" letter-spacing="-7">THINK IN</text>
+    <text x="61" y="387" fill="url(#accent)" font-size="142" font-weight="700" letter-spacing="-7">FLOWS.</text>
+    <text x="68" y="445" fill="#59636B" font-size="26">Parallel agents. Verified handoffs.</text>
+    <text x="68" y="483" fill="#59636B" font-size="26">Progress you can resume.</text>
+
+    <!-- Open rings suggest a system, without representing a product UI. -->
+    <path d="M950 166C1090 92 1268 147 1334 280" stroke="#CED6D8" stroke-width="1.5"/>
+    <path d="M1318 419C1240 515 1073 548 951 478" stroke="#CED6D8" stroke-width="1.5"/>
+    <path d="M929 154L937 168L951 160M950 478L946 493L961 497" stroke="#99A5AA" stroke-width="1.5"/>
+    <circle cx="1266" cy="197" r="4" fill="#60879B"/>
+    <circle cx="1190" cy="509" r="4" fill="#BF794B"/>
+
+    <g stroke-width="2.5" stroke-linecap="round">
+      <path d="M846 324H877C918 324 906 216 947 216H959" stroke="url(#inbound)"/>
+      <path d="M846 324H959" stroke="url(#inbound)"/>
+      <path d="M846 324H877C918 324 906 432 947 432H959" stroke="url(#inbound)"/>
+      <path d="M1201 216H1220C1260 216 1247 324 1288 324" stroke="url(#outbound)"/>
+      <path d="M1201 324H1288" stroke="url(#outbound)"/>
+      <path d="M1201 432H1220C1260 432 1247 324 1288 324" stroke="url(#outbound)"/>
+    </g>
+    <circle cx="816" cy="324" r="32" fill="#F3E4D4" stroke="#C18D64" stroke-width="1.5"/>
+    <text x="816" y="333" text-anchor="middle" fill="#99552E" font-family="'Courier New', 'Liberation Mono', monospace" font-size="27" font-weight="700">{ }</text>
+    <text x="816" y="387" text-anchor="middle" fill="#626E76" font-size="19">Script</text>
+    <circle cx="886" cy="324" r="5" fill="#B76D3A"/>
+
+    <g>
+      <rect x="959" y="176" width="242" height="80" rx="14" fill="#EAF0F2" stroke="#A3B8C2" stroke-width="1.5"/>
+      <rect x="959" y="284" width="242" height="80" rx="14" fill="#EAF0F2" stroke="#A3B8C2" stroke-width="1.5"/>
+      <rect x="959" y="392" width="242" height="80" rx="14" fill="#EAF0F2" stroke="#A3B8C2" stroke-width="1.5"/>
+      <path d="M959 203V229M959 311V337M959 419V445" stroke="#587E92" stroke-width="3"/>
+      <g fill="#667D89" font-family="'Courier New', 'Liberation Mono', monospace" font-size="16" letter-spacing="1.5">
+        <text x="980" y="204">REVIEW / 01</text>
+        <text x="980" y="312">REVIEW / 02</text>
+        <text x="980" y="420">REVIEW / 03</text>
+      </g>
+      <g fill="#2B485A" font-size="23" font-weight="700">
+        <text x="980" y="236">Correctness</text>
+        <text x="980" y="344">Coverage</text>
+        <text x="980" y="452">Maintainability</text>
+      </g>
+      <g fill="#557F96">
+        <circle cx="1175" cy="200" r="3"/>
+        <circle cx="1175" cy="308" r="3"/>
+        <circle cx="1175" cy="416" r="3"/>
+      </g>
+    </g>
+
+    <circle cx="1259" cy="324" r="5" fill="#557F96"/>
+    <circle cx="1320" cy="324" r="32" fill="#DCEAF0" stroke="#729CAF" stroke-width="1.5"/>
+    <path d="M1307 324L1316 333L1333 315" stroke="#366B82" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1320" y="387" text-anchor="middle" fill="#626E76" font-size="19">Collect</text>
+
+    <g font-size="18" font-family="'Courier New', 'Liberation Mono', monospace" letter-spacing="1.4">
+      <text x="68" y="588" fill="#A45B32">01 <tspan fill="#626D75">COMPOSE</tspan></text>
+      <text x="444" y="588" fill="#A45B32">02 <tspan fill="#626D75">ORCHESTRATE</tspan></text>
+      <text x="917" y="588" fill="#A45B32">03 <tspan fill="#626D75">RESUME</tspan></text>
+    </g>
+    <path d="M273 581H390M378 575L390 581L378 587M739 581H859M847 575L859 581L847 587" stroke="#9CA6AC" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <g transform="translate(1329 568)" stroke="#87969F" stroke-width="1.5" stroke-linecap="round">
+      <path d="M0 0V26M-13 13H13M-9 4L9 22M-9 22L9 4"/>
+      <circle cx="0" cy="13" r="4" fill="#F2F1EC" stroke="#A5683D"/>
+    </g>
+  </g>
+</svg>
