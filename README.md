@@ -3,7 +3,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/hero-dark.svg" />
   <source media="(prefers-color-scheme: light)" srcset="assets/hero-light.svg" />
-  <img src="assets/hero-light.svg" alt="OpenCode Workflow Engine — Think in flows. Parallel agents, verified handoffs, and progress you can resume." width="100%" />
+  <img src="assets/hero-light.svg" alt="OpenCode Workflow Engine" width="100%" />
 </picture>
 
 ### A small script. A real team of agents. A way to pick up where you left off.
@@ -67,11 +67,15 @@ const findings = await pipeline(
 return findings.filter(result => result !== null);
 ```
 
+<div align="center">
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/pipeline-dark.svg" />
   <source media="(prefers-color-scheme: light)" srcset="assets/pipeline-light.svg" />
-  <img src="assets/pipeline-light.svg" alt="Illustrated pipeline: file A has finished review and verification; file B is still being reviewed; file C is being verified. Items advance independently." width="100%" />
+  <img src="assets/pipeline-light.svg" alt="Illustrated pipeline: file A has finished review and verification; file B is still being reviewed; file C is being verified. Items advance independently." width="480" />
 </picture>
+
+</div>
 
 <p align="center"><sub>Illustrated execution flow. Use <code>parallel()</code> when the next step needs every result.</sub></p>
 

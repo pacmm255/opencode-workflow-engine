@@ -1,93 +1,51 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="440" viewBox="0 0 1440 440" fill="none" role="img" aria-labelledby="title description">
-  <title id="title">A pipeline keeps every item moving independently</title>
-  <desc id="description">An illustrative execution snapshot. File A has completed review and verification, and its result is ready. File B is still in review. File C has already advanced to verification without waiting for file B.</desc>
-  <defs>
-    <linearGradient id="paper" x1="0" y1="0" x2="1440" y2="440" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#15181D"/>
-      <stop offset="1" stop-color="#0C1016"/>
-    </linearGradient>
-  </defs>
-  <rect x="1" y="1" width="1438" height="438" rx="24" fill="url(#paper)" stroke="#31343B" stroke-width="2"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="636" viewBox="0 0 480 636" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">Each file advances independently through the pipeline</title>
+  <desc id="description">Three stacked file cards show review and verification states. File A has finished both stages. File B is still being reviewed. File C is being verified without waiting for file B. This is an illustrated execution snapshot, not a product screenshot.</desc>
+  <rect x="1" y="1" width="478" height="634" rx="20" fill="#11161D" stroke="#485869" stroke-width="2"/>
   <g font-family="Arial, Helvetica, 'Liberation Sans', sans-serif">
-    <text x="56" y="65" fill="#F3F1EA" font-size="32" font-weight="700" letter-spacing="-.6">Independent by design.</text>
-    <text x="56" y="102" fill="#B9C0C8" font-size="22">Every item advances when its own work is ready.</text>
-    <circle cx="1108" cy="65" r="5" fill="#FFD09A"/>
-    <text x="1123" y="72" fill="#B9C0C8" font-size="18">Running</text>
-    <path d="M1234 65L1239 70L1248 60" stroke="#B5D8EC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="1261" y="72" fill="#B9C0C8" font-size="18">Complete</text>
-
-    <g fill="#8396A6" font-family="'Courier New', 'Liberation Mono', monospace" font-size="17" letter-spacing="1.8">
-      <text x="58" y="153">ITEM</text>
-      <text x="312" y="153">01 / REVIEW</text>
-      <text x="722" y="153">02 / VERIFY</text>
-      <text x="1112" y="153">RESULT</text>
+    <text x="24" y="49" fill="#F1F5F9" font-size="30" font-weight="700">Independent by design.</text>
+    <text x="24" y="84" fill="#B8C7D4" font-size="24">Each file moves at its own pace.</text>
+    <g>
+      <rect x="24" y="112" width="432" height="156" rx="14" stroke="#485869" stroke-width="1.5"/>
+      <text x="44" y="149" fill="#F1F5F9" font-size="26" font-weight="700">file A</text>
+      <text x="436" y="149" text-anchor="end" fill="#D9EDFB" font-size="24">Result ready</text>
+      <rect x="44" y="166" width="168" height="78" rx="10" fill="#1B2935" stroke="#7799AF" stroke-width="2"/>
+      <text x="60" y="197" fill="#D9EDFB" font-size="26" font-weight="700">Review</text>
+      <text x="60" y="227" fill="#D9EDFB" font-size="24">Done</text>
+      <path d="M176 220l6 6 11-12" stroke="#D9EDFB" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="268" y="166" width="168" height="78" rx="10" fill="#1B2935" stroke="#7799AF" stroke-width="2"/>
+      <text x="284" y="197" fill="#D9EDFB" font-size="26" font-weight="700">Verify</text>
+      <text x="284" y="227" fill="#D9EDFB" font-size="24">Done</text>
+      <path d="M400 220l6 6 11-12" stroke="#D9EDFB" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M226 205h28m-7-6 7 6-7 6" stroke="#91AEC2" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
     </g>
-    <g fill="#DEEAF1" font-family="'Courier New', 'Liberation Mono', monospace" font-size="25" font-weight="700">
-      <text x="58" y="221">file A</text>
-      <text x="58" y="307">file B</text>
-      <text x="58" y="393">file C</text>
+    <g>
+      <rect x="24" y="284" width="432" height="156" rx="14" stroke="#485869" stroke-width="1.5"/>
+      <text x="44" y="321" fill="#F1F5F9" font-size="26" font-weight="700">file B</text>
+      <text x="436" y="321" text-anchor="end" fill="#B8C7D4" font-size="24">Result pending</text>
+      <rect x="44" y="338" width="168" height="78" rx="10" fill="#30251E" stroke="#F2BC84" stroke-width="2"/>
+      <text x="60" y="369" fill="#F2BC84" font-size="26" font-weight="700">Review</text>
+      <text x="60" y="399" fill="#F2BC84" font-size="24">Running</text>
+      <circle cx="185" cy="392" r="5" fill="#F2BC84" stroke="#F2BC84" stroke-width="2"/>
+      <rect x="268" y="338" width="168" height="78" rx="10" fill="#151C24" stroke="#7B8A99" stroke-width="2" stroke-dasharray="4 4"/>
+      <text x="284" y="369" fill="#B8C7D4" font-size="26" font-weight="700">Verify</text>
+      <text x="284" y="399" fill="#B8C7D4" font-size="24">Waiting</text>
+      <circle cx="409" cy="392" r="6" fill="none" stroke="#B8C7D4" stroke-width="2"/>
+      <path d="M226 377h28" stroke="#7B8A99" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="4 6"/>
     </g>
-
-    <!-- Each lane is independent: there is no barrier between stages. -->
-    <g stroke="#809BAE" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M186 212H285M277 207L285 212L277 217"/>
-      <path d="M186 298H285M277 293L285 298L277 303"/>
-      <path d="M186 384H285M277 379L285 384L277 389"/>
-      <path d="M596 212H699M691 207L699 212L691 217"/>
-      <path d="M986 212H1090M1082 207L1090 212L1082 217"/>
-      <path d="M596 384H699M691 379L699 384L691 389"/>
-    </g>
-    <g stroke="#46525E" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 7">
-      <path d="M596 298H699"/>
-      <path d="M986 298H1090"/>
-      <path d="M986 384H1090"/>
-    </g>
-
-    <g fill="#18212A" stroke="#425564" stroke-width="1.5">
-      <rect x="310" y="182" width="266" height="60" rx="12"/>
-      <rect x="720" y="182" width="266" height="60" rx="12"/>
-      <rect x="1110" y="182" width="274" height="60" rx="12"/>
-      <rect x="310" y="354" width="266" height="60" rx="12"/>
-    </g>
-    <g fill="#29251F" stroke="#DCA674" stroke-width="1.5">
-      <rect x="310" y="268" width="266" height="60" rx="12"/>
-      <rect x="720" y="354" width="266" height="60" rx="12"/>
-    </g>
-    <g stroke="#46525E" stroke-width="1.5" stroke-dasharray="4 5">
-      <rect x="720" y="268" width="266" height="60" rx="12"/>
-      <rect x="1110" y="268" width="274" height="60" rx="12"/>
-      <rect x="1110" y="354" width="274" height="60" rx="12"/>
-    </g>
-
-    <g stroke="#B5D8EC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M334 212L341 219L353 205"/>
-      <path d="M744 212L751 219L763 205"/>
-      <path d="M1134 212L1141 219L1153 205"/>
-      <path d="M334 384L341 391L353 377"/>
-    </g>
-    <g fill="#DEEAF1" font-size="23" font-weight="700">
-      <text x="370" y="220">Complete</text>
-      <text x="780" y="220">Complete</text>
-      <text x="1170" y="220">Result ready</text>
-      <text x="370" y="392">Complete</text>
-    </g>
-    <g fill="#FFD09A">
-      <circle cx="343" cy="298" r="5"/>
-      <circle cx="753" cy="384" r="5"/>
-    </g>
-    <g fill="#FFD09A" font-size="23" font-weight="700">
-      <text x="370" y="306">Reviewing</text>
-      <text x="780" y="392">Verifying</text>
-    </g>
-    <g stroke="#697785" stroke-width="1.5">
-      <circle cx="753" cy="298" r="6"/>
-      <circle cx="1143" cy="298" r="6"/>
-      <circle cx="1143" cy="384" r="6"/>
-    </g>
-    <g fill="#8E9AA6" font-size="22">
-      <text x="780" y="306">Awaiting review</text>
-      <text x="1170" y="306">Pending</text>
-      <text x="1170" y="392">Pending</text>
+    <g>
+      <rect x="24" y="456" width="432" height="156" rx="14" stroke="#485869" stroke-width="1.5"/>
+      <text x="44" y="493" fill="#F1F5F9" font-size="26" font-weight="700">file C</text>
+      <text x="436" y="493" text-anchor="end" fill="#B8C7D4" font-size="24">Result pending</text>
+      <rect x="44" y="510" width="168" height="78" rx="10" fill="#1B2935" stroke="#7799AF" stroke-width="2"/>
+      <text x="60" y="541" fill="#D9EDFB" font-size="26" font-weight="700">Review</text>
+      <text x="60" y="571" fill="#D9EDFB" font-size="24">Done</text>
+      <path d="M176 564l6 6 11-12" stroke="#D9EDFB" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="268" y="510" width="168" height="78" rx="10" fill="#30251E" stroke="#F2BC84" stroke-width="2"/>
+      <text x="284" y="541" fill="#F2BC84" font-size="26" font-weight="700">Verify</text>
+      <text x="284" y="571" fill="#F2BC84" font-size="24">Running</text>
+      <circle cx="409" cy="564" r="5" fill="#F2BC84" stroke="#F2BC84" stroke-width="2"/>
+      <path d="M226 549h28m-7-6 7 6-7 6" stroke="#91AEC2" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
     </g>
   </g>
 </svg>
