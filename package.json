@@ -1,0 +1,42 @@
+{
+  "name": "opencode-workflow-engine",
+  "version": "0.1.0",
+  "description": "Dynamic multi-agent workflows for OpenCode: a Claude Code-style `workflow` tool where the model writes a JavaScript orchestration script (agent/parallel/pipeline/phase/budget), runs it in an isolated sandbox with real child sessions, journals every result, and can resume from cache.",
+  "keywords": ["opencode", "opencode-plugin", "workflow", "multi-agent", "subagent", "orchestration", "dynamic-workflows", "tui"],
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./server": {
+      "import": "./dist/server.js"
+    },
+    "./tui": {
+      "import": "./dist/tui.js"
+    }
+  },
+  "files": ["dist", "workflows", "assets", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test ./test",
+    "test:integration": "bun run build && bun test ./e2e --timeout 120000",
+    "prepublishOnly": "bun run typecheck && bun run test && bun run build"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.18.29",
+    "@opencode-ai/sdk": "^1.18.29",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "zod": "4.1.8"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.13",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "opencode": ">=1.18.29"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,37 @@
+# Dependencies and generated artifacts
+node_modules/
+dist/
+coverage/
+*.log
+*.tgz
+
+# Local notes and AI configuration; README is the only published Markdown file.
+docs/
+skills/
+*.[mM][dD]
+*.mdx
+*.markdown
+!/README.md
+.opencode/
+.claude/
+.codex/
+.cursor/
+.windsurf/
+.aider*
+.mcp.json
+mcp.json
+opencode.json
+opencode.jsonc
+tui.json
+tui.jsonc
+
+# Local credentials, editor state, and scratch data
+.env
+.env.*
+*.pem
+*.key
+.idea/
+.vscode/
+.DS_Store
+tmp/
+scratch/
