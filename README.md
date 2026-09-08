@@ -83,30 +83,17 @@ return findings.filter(result => result !== null);
 
 ## Quick start
 
-**01 — Build the plugin**
+**01 — Install with one command**
 
-Requires Bun, GitHub CLI, and OpenCode 1.18.29 or later. Your GitHub account needs access to this private repository.
+Requires macOS or Linux, Bash, Git, Bun, GitHub CLI, and OpenCode 1.18.29 or later. Sign in with `gh auth login` using an account with access to this private repository.
 
 ```sh
-gh repo clone pacmm255/opencode-workflow-engine
-cd opencode-workflow-engine
-bun install --frozen-lockfile
-bun run build
+bash -c 'set -e; workflow_installer=$(gh api --hostname github.com repos/pacmm255/opencode-workflow-engine/contents/install.sh -H "Accept: application/vnd.github.raw+json"); bash -c "$workflow_installer"'
 ```
 
-**02 — Connect it to OpenCode**
+The command downloads the installer completely before running it. It builds the plugin and enables both the server and native dialogs in your global OpenCode configuration. No manual path editing is needed.
 
-Add the server entry to your project's `opencode.json`. Replace the example with your checkout's **absolute path**; append it if you already have a `plugin` array.
-
-```json
-{
-  "plugin": [
-    "file:///absolute/path/to/opencode-workflow-engine/dist/server.js"
-  ]
-}
-```
-
-**03 — Give it a task**
+**02 — Give it a task**
 
 Restart OpenCode, then:
 
@@ -117,31 +104,17 @@ Restart OpenCode, then:
 The model reads the authoring reference, writes a workflow, and runs it. Child agents inherit the invoking session's model by default.
 
 <details>
-<summary><strong>Add native model and run dialogs</strong></summary>
+<summary><strong>Installation, updates, and native dialogs</strong></summary>
 
-Add the TUI entry to the `plugin` array in `tui.json`:
+Review the [installer](install.sh) and [configuration helper](scripts/configure.ts) before running code from GitHub. The repository is private; an unauthenticated download will not work.
 
-```json
-{
-  "plugin": [
-    "file:///absolute/path/to/opencode-workflow-engine/dist/tui.js"
-  ]
-}
-```
+Run the same command again to update from `main`. Each build uses a fresh managed directory; previous builds are retained. Existing plugin entries, options, JSONC comments, and unrelated settings are preserved. Modified configuration files receive unique backups. Invalid configuration stops registration; individual file updates are atomic, but the two-file update is not a transaction.
 
-`/workflow-config` opens the model picker. `/workflows` opens run details and child sessions, with stop and skip controls. Server commands work without the TUI plugin.
+The installer respects the standard XDG data and configuration locations and registers the default global configuration. Project settings or explicit OpenCode configuration overrides can still take precedence.
 
-When attaching through an SSH tunnel, mark the TUI connection as remote:
+`/workflow-config` opens the model picker. `/workflows` opens run details and child sessions, with stop and skip controls.
 
-```json
-{
-  "plugin": [
-    ["file:///absolute/path/to/opencode-workflow-engine/dist/tui.js", { "remote": true }]
-  ]
-}
-```
-
-Remote dialogs prepare requests for the server tools. Direct management of local configuration and run files is available in local mode.
+For an SSH tunnel, set `remote: true` in the installed TUI plugin entry's options in `tui.json` or `tui.jsonc`; retain the generated entry. Remote dialogs prepare requests for the server tools. Local dialogs manage local configuration and run files.
 
 </details>
 
@@ -153,7 +126,7 @@ Save the earlier example as `review.js`, then ask the model to call the `workflo
 ```json
 {
   "scriptPath": "review.js",
-  "args": { "files": ["src/server.ts", "src/core/run/manager.ts"] },
+  "args": { "files": ["package.json", "README.md"] },
   "background": true,
   "tokenBudget": 20000
 }
@@ -173,7 +146,7 @@ Use the session's model to get started. Open `/workflow-config` when you want an
 
 **Explicit choice → selected agent's model → workflow default → session model.**
 
-Exact `provider/model` IDs, aliases, unique short IDs, and variants are supported. Ambiguous names produce an error with candidates.
+Exact model IDs, aliases, unique short IDs, and variants are supported. Ambiguous names produce an error with candidates.
 
 <details>
 <summary><strong>Configure a model pool and execution limits</strong></summary>
@@ -181,10 +154,10 @@ Exact `provider/model` IDs, aliases, unique short IDs, and variants are supporte
 ```json
 {
   "models": {
-    "allowed": ["your-provider/your-model"],
+    "allowed": [],
     "default": "session",
-    "strict": true,
-    "aliases": { "fast": "your-provider/your-model" }
+    "strict": false,
+    "aliases": {}
   },
   "limits": { "maxConcurrency": 4 },
   "defaults": { "retries": 1 },
@@ -192,7 +165,7 @@ Exact `provider/model` IDs, aliases, unique short IDs, and variants are supporte
 }
 ```
 
-Use exact IDs from `workflow_config show`. Global settings live in `$XDG_CONFIG_HOME/opencode/workflow.json`, normally `~/.config/opencode/workflow.json`; project overrides live in `.opencode/workflow.json` under the plugin's project directory.
+This example inherits the session model without restricting the pool. Choose exact IDs from `workflow_config show` before adding allowed models or aliases. Global and project settings each use `workflow.json` in their respective OpenCode configuration directories.
 
 Project fields override global fields. Arrays replace; aliases merge by name. In strict mode, explicit choices and explicitly selected `agentType` models must belong to the allowed pool. Aliases cannot bypass it. Inherited session and workflow defaults remain usable.
 
@@ -204,14 +177,10 @@ Project fields override global fields. Arrays replace; aliases merge by name. In
 
 ## Keep the work you've already done.
 
-Each successful agent result is **appended and synced before it returns**. If a run stops, the report gives you the script path and run ID needed to resume.
+Each successful agent result is **appended and synced before it returns**. If a run stops, ask OpenCode to resume using the saved script, run ID, and original arguments from the run report:
 
-```json
-{
-  "scriptPath": "/path/from/the/report/script.js",
-  "resumeFromRunId": "wf_<uuid>",
-  "args": { "files": ["src/server.ts", "src/core/run/manager.ts"] }
-}
+```text
+Resume the interrupted workflow using its saved script and original arguments.
 ```
 
 Matching prompts and semantic options reuse successful results. Changed work runs again. Labels, phases, timeouts, and retry settings can change without losing a match; cached results add no token spend.
@@ -222,18 +191,9 @@ Matching prompts and semantic options reuse successful results. Changed work run
 <details>
 <summary><strong>Inside a saved run</strong></summary>
 
-```text
-wf_<uuid>/
-├── script.js          The executed script
-├── args.json          Its arguments
-├── run.json           State, phases, agents, and usage
-├── journal.jsonl      Synced execution journal
-├── result.json        The complete result
-└── agents/
-    └── a_1.json       Prompt, options, session, and result
-```
+Each saved run includes `script.js`, `args.json`, `run.json`, `journal.jsonl`, and `result.json`, plus individual agent records with prompts, options, sessions, and results.
 
-Runs live in `$XDG_DATA_HOME/opencode/workflow/runs`, normally `~/.local/share/opencode/workflow/runs`. Records contain prompts and results; keep them local and private.
+Runs are stored in OpenCode's local workflow data directory. Records contain prompts and results; keep them local and private.
 
 Repeated identical calls consume cached successes in invocation order. Failed/skipped calls are never cached as successes. Prompt, schema, model options, agent type, system text, isolation, and tool choices affect matching.
 
@@ -308,7 +268,7 @@ The tools are `workflow`, `workflow_reference`, `workflow_runs`, `workflow_saved
 
 <table>
 <tr>
-<td width="33%" align="center"><h2>160</h2><p>unit tests passed</p></td>
+<td width="33%" align="center"><h2>190</h2><p>unit tests passed</p></td>
 <td width="33%" align="center"><h2>8</h2><p>real-server integration tests passed</p></td>
 <td width="33%" align="center"><h2>1.18.29</h2><p>OpenCode version verified</p></td>
 </tr>
@@ -321,7 +281,9 @@ The integration harness starts a real OpenCode server with isolated configuratio
 
 Recorded on September 8, 2026 with Bun 1.4.2 and OpenCode 1.18.29. These are recorded test results, not live CI indicators.
 
-Unit coverage includes model/config policy, schemas, replay, cancellation, timed-out transports, late replies, missing-worker initialization, plugin registration, and native dialog APIs.
+Unit coverage includes model/config policy, schemas, replay, cancellation, timed-out transports, late replies, missing-worker initialization, plugin registration, native dialog APIs, and installer preservation/failure handling.
+
+The installer is also checked in an isolated environment with a real dependency install and build, including a repeat install that preserves configuration without duplicate entries.
 
 Paid-provider behavior, plan quotas, rendered terminal interactions, and the web UI have not been tested. The live sidebar is not implemented.
 
@@ -363,7 +325,7 @@ src/
 
 `test/` contains unit tests. `e2e/` contains the real-server harness and local model fixture. `workflows/` contains the built-in scripts.
 
-Builds produce `dist/server.js`, `dist/tui.js`, `dist/worker.js`, and the runtime authoring guide in `dist/skills/`. Generated files and local AI configuration are excluded from GitHub.
+Builds produce the server, TUI, worker, and runtime authoring guide in the distribution directory. Generated files and local AI configuration are excluded from GitHub.
 
 </details>
 
