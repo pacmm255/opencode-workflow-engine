@@ -57,9 +57,9 @@ if (command === "bun") {
     if (args[1] !== "--frozen-lockfile") throw new Error("Unlocked dependencies");
     process.exit(fail === "dependencies" ? 1 : 0);
   }
-  if (args[0] === "run" && args[1] === "build") {
-    event("build");
-    if (fail === "build") process.exit(1);
+  if (args[0] === "run" && args[1] === "bundle") {
+    event("bundle");
+    if (fail === "bundle") process.exit(1);
     mkdirSync("dist/skills/workflow-authoring", { recursive: true });
     for (const entry of ["server", "tui", "worker"]) writeFileSync("dist/" + entry + ".js", "export {};\n");
     writeFileSync("dist/skills/workflow-authoring/SKILL.md", "Authoring reference fixture\n");
@@ -143,11 +143,11 @@ describe("one-line installer shell", () => {
       const config = parse(await readFile(join(f.configDir, file!), "utf8"));
       expect(config.plugin).toEqual([pathToFileURL(join(current, "dist", `${entry}.js`)).href]);
     }
-    expect((await readFile(f.events, "utf8")).trim().split("\n")).toEqual(["auth", "clone", "dependencies", "build", "check", "configure", "revision"]);
+    expect((await readFile(f.events, "utf8")).trim().split("\n")).toEqual(["auth", "clone", "dependencies", "bundle", "check", "configure", "revision"]);
     await expectUnlocked(f);
   }, 20_000);
 
-  test.each(["auth", "clone", "dependencies", "build", "preflight"])("%s failure preserves the previous release and cleans up its lock", async failure => {
+  test.each(["auth", "clone", "dependencies", "bundle", "preflight"])("%s failure preserves the previous release and cleans up its lock", async failure => {
     const f = await fixture();
     const prior = await priorInstallation(f);
     const result = await run(f, failure);
@@ -240,15 +240,12 @@ describe("one-line installer shell", () => {
     expect(await readlink(join(f.installRoot, "current"))).toBe(prior);
   }, 20_000);
 
-  test("README command never executes a partial body from a failed GitHub download", async () => {
-    const f = await fixture();
+  test("README documents native project and global Git installation without placeholder paths", async () => {
     const readme = await readFile(join(repository, "README.md"), "utf8");
-    const command = readme.match(/```sh\n([^\n]+)\n```/)?.[1];
-    expect(command).toContain("gh api");
-    const result = await run(f, undefined, command!);
-    expect(result.exitCode).not.toBe(0);
-    expect(await readFile(f.events, "utf8")).toBe("api\n");
-    await expect(lstat(f.env.WORKFLOW_TEST_PARTIAL_EXECUTED)).rejects.toThrow();
-    await expect(lstat(f.installRoot)).rejects.toThrow();
-  }, 20_000);
+    const commands = [...readme.matchAll(/```sh\n([^\n]+)\n```/g)].map((match) => match[1]);
+    const gitSpecifier = "git+https://github.com/pacmm255/opencode-workflow-engine.git";
+    expect(commands).toContain(`opencode plugin ${gitSpecifier}`);
+    expect(commands).toContain(`opencode plugin -g ${gitSpecifier}`);
+    expect(readme).not.toMatch(/file:\/\/\/absolute\/|path\/to\//);
+  });
 });

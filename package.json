@@ -1,26 +1,27 @@
 {
   "name": "opencode-workflow-engine",
   "version": "0.1.0",
+  "private": true,
   "description": "Dynamic multi-agent workflows for OpenCode: a Claude Code-style `workflow` tool where the model writes a JavaScript orchestration script (agent/parallel/pipeline/phase/budget), runs it in an isolated sandbox with real child sessions, journals every result, and can resume from cache.",
   "keywords": ["opencode", "opencode-plugin", "workflow", "multi-agent", "subagent", "orchestration", "dynamic-workflows", "tui"],
   "license": "MIT",
   "type": "module",
   "exports": {
     "./server": {
-      "import": "./dist/server.js"
+      "import": "./src/server.ts"
     },
     "./tui": {
-      "import": "./dist/tui.js"
+      "import": "./src/tui.ts"
     }
   },
-  "files": ["dist", "workflows", "assets", "README.md", "LICENSE"],
+  "files": ["src", "dist", "workflows", "assets", "README.md", "LICENSE"],
   "scripts": {
-    "build": "bun run scripts/build.ts",
+    "bundle": "bun run scripts/build.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test ./test",
-    "test:integration": "bun run build && bun test ./e2e --timeout 120000",
-    "test:tui": "bun run build && bun run scripts/verify-tui.ts",
-    "prepublishOnly": "bun run typecheck && bun run test && bun run build"
+    "test:integration": "bun run bundle && bun test ./e2e --timeout 120000",
+    "test:tui": "bun run bundle && bun run scripts/verify-tui.ts",
+    "test:native": "bun run scripts/verify-native-install.ts"
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.18.29",
@@ -37,8 +38,5 @@
   },
   "engines": {
     "opencode": ">=1.18.29"
-  },
-  "publishConfig": {
-    "access": "public"
   }
 }

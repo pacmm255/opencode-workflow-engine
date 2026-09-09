@@ -68,7 +68,7 @@ workflow_main() {
   (
     cd "$workflow_release"
     bun install --frozen-lockfile
-    bun run build
+    bun run bundle
   )
   for workflow_command in server tui worker; do
     [[ -s "$workflow_release/dist/$workflow_command.js" ]] || workflow_die "Missing built $workflow_command entry. The previous installation is unchanged."

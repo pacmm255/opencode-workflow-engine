@@ -1,6 +1,6 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
 import { createOpencodeClient, type Agent, type Config } from "@opencode-ai/sdk/v2";
-import { fileURLToPath } from "node:url";
+import { ensureAuthoringSkill } from "./core/authoring-skill";
 import { commands } from "./core/commands";
 import { configPatchSchema, defaultConfig, loadConfig, resetConfig, saveConfig } from "./core/config";
 import { failure } from "./core/errors";
@@ -45,7 +45,7 @@ const WorkflowPlugin: Plugin = async ({ client: original, directory, serverUrl }
       // The hook is typed with SDK v1; OpenCode 1.18 consumes v2 skill config.
       const currentV2 = current as unknown as Config;
       currentV2.skills ??= {};
-      const path = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "../dist/skills/" : "./skills/", import.meta.url));
+      const path = await ensureAuthoringSkill();
       currentV2.skills.paths = [...new Set([...(currentV2.skills.paths ?? []), path])];
     },
     "tool.definition": async ({ toolID }, output) => {

@@ -2,13 +2,14 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import type { PluginInput, ToolContext } from "@opencode-ai/plugin";
 import plugin from "../src/server.ts";
 import { defaultConfig, loadConfig } from "../src/core/config.ts";
+import { authoringSkillContent } from "../src/core/authoring-skill.ts";
 
 const previousConfigHome = process.env.XDG_CONFIG_HOME;
 const previousDataHome = process.env.XDG_DATA_HOME;
+const previousCacheHome = process.env.XDG_CACHE_HOME;
 const cleanup: Array<{ root: string; dispose: () => Promise<void> }> = [];
 afterEach(async () => {
   for (const fixture of cleanup.splice(0)) {
@@ -19,12 +20,15 @@ afterEach(async () => {
   else process.env.XDG_CONFIG_HOME = previousConfigHome;
   if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME;
   else process.env.XDG_DATA_HOME = previousDataHome;
+  if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+  else process.env.XDG_CACHE_HOME = previousCacheHome;
 });
 
 async function fixture(options: { malformed?: boolean; hold?: Promise<void> } = {}) {
   const root = await mkdtemp(join(tmpdir(), "workflow-server-test-"));
   process.env.XDG_CONFIG_HOME = join(root, "config");
   process.env.XDG_DATA_HOME = join(root, "data");
+  process.env.XDG_CACHE_HOME = join(root, "cache");
   const directory = join(root, "project");
   if (options.malformed) {
     await mkdir(join(directory, ".opencode"), { recursive: true });
@@ -86,7 +90,8 @@ test("config hook registers commands, subagent, and absolute skill path without 
   const skills = (config as unknown as { skills: { paths: string[] } }).skills.paths;
   expect(skills).toHaveLength(1);
   expect(isAbsolute(skills[0]!)).toBe(true);
-  expect(skills[0]).toBe(fileURLToPath(new URL("../dist/skills/", import.meta.url)));
+  expect(skills[0]).toStartWith(join(f.root, "cache", "opencode", "workflow", "skills") + "/");
+  expect(await readFile(join(skills[0]!, "workflow-authoring", "SKILL.md"), "utf8")).toBe(authoringSkillContent);
   await f.hooks.config?.(config);
   expect((config as unknown as { skills: { paths: string[] } }).skills.paths).toHaveLength(1);
 });

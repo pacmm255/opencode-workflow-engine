@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { reference } from "../src/core/reference";
+import { authoringSkillContent } from "../src/core/authoring-skill";
 
 await mkdir("dist", { recursive: true });
 const result = await Bun.build({
@@ -9,14 +9,5 @@ const result = await Bun.build({
 });
 if (!result.success) { for (const log of result.logs) console.error(log); process.exit(1); }
 await mkdir("dist/skills/workflow-authoring", { recursive: true });
-await writeFile("dist/skills/workflow-authoring/SKILL.md", `---
-name: workflow-authoring
-description: Design and run JavaScript workflows with parallel agents, pipelines, structured output, and resumable execution in OpenCode.
----
-
-# Workflow authoring
-
-Read workflow_reference before writing a workflow to include the current model catalog and configuration guidance.
-
-${reference}`);
+await writeFile("dist/skills/workflow-authoring/SKILL.md", authoringSkillContent);
 console.log(`Built ${result.outputs.length} artifacts in dist/`);

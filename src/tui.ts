@@ -142,11 +142,11 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
     if (!local) { remoteRequest("Workflow configuration on a remote server", "Use workflow_config with action show, then help me configure the workflow model pool."); return; }
     const config = await loadConfig(directory(), globalDirectory());
     select(`Workflow configuration (${scope})`, [
-      { title: `Connected providers and model pool (${config.models.allowed.length})`, value: "models", description: "Choose a connection, then toggle its models" },
+      { title: `Connected providers and model pool (${config.models.allowed.length})`, value: "models", description: "Pick a connection, then models" },
       { title: `Default model: ${config.models.default}`, value: "default" },
       { title: `Strict model pool: ${config.models.strict ? "on" : "off"}`, value: "strict", description: "Inherited default/session model remains permitted" },
       { title: `Size guideline: ${config.sizeGuideline ?? "unrestricted"}`, value: "size" },
-      { title: `Save scope: ${scope}`, value: "scope", description: "Values shown are effective settings; project overrides take priority over global" },
+      { title: `Save scope: ${scope}`, value: "scope", description: "Effective settings; project overrides global" },
       { title: `Reset ${scope} overrides`, value: "reset" },
       { title: "Done", value: "done" },
     ], async (value) => {

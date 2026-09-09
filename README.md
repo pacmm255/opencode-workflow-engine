@@ -83,24 +83,34 @@ return findings.filter(result => result !== null);
 
 ## Quick start
 
-**Install with one command**
+Requires OpenCode 1.18.29 or later, Git, and access to this private repository. For GitHub CLI authentication, run `gh auth login` and `gh auth setup-git` once, or use your existing Git HTTPS credentials.
 
-Requires macOS or Linux, Bash, Git, Bun, GitHub CLI, and OpenCode 1.18.29 or later. Sign in with `gh auth login` using an account with access to this private repository.
+**Install for the current project:**
 
 ```sh
-bash -c 'set -e; workflow_installer=$(gh api --hostname github.com repos/pacmm255/opencode-workflow-engine/contents/install.sh -H "Accept: application/vnd.github.raw+json"); bash -c "$workflow_installer"'
+opencode plugin git+https://github.com/pacmm255/opencode-workflow-engine.git
 ```
 
-The command downloads the installer completely before running it. It builds the plugin and enables both the server and native dialogs in your global OpenCode configuration. No manual path editing is needed.
+**Install globally:**
+
+```sh
+opencode plugin -g git+https://github.com/pacmm255/opencode-workflow-engine.git
+```
+
+OpenCode's native installer registers both the workflow tools and terminal dialogs. Restart OpenCode after installation. No shell bootstrap, manual path editing, or public npm package is required.
 
 <details>
 <summary><strong>Installation, updates, and native dialogs</strong></summary>
 
-Review the [installer](install.sh) and [configuration helper](scripts/configure.ts) before running code from GitHub. The repository is private; an unauthenticated download will not work.
+The repository remains private. Git must be authenticated with an account that can read it; this is not an anonymous npm install.
 
-Run the same command again to update from `main`. Each build uses a fresh managed directory; previous builds are retained. Existing plugin entries, options, JSONC comments, and unrelated settings are preserved. Modified configuration files receive unique backups. Invalid configuration stops registration; individual file updates are atomic, but the two-file update is not a transaction.
+Add `-f` to the appropriate install command to replace the installed version. Keep `-g` for a global installation. OpenCode manages plugin registration in both its server and TUI configuration; project configuration can override global settings.
 
-The installer respects the standard XDG data and configuration locations and registers the default global configuration. Project settings or explicit OpenCode configuration overrides can still take precedence.
+Git installs load the TypeScript entrypoints directly in OpenCode. The authoring guide is generated in OpenCode's cache, so no build step or generated Markdown needs to be committed.
+
+The earlier [shell installer](install.sh) and [configuration helper](scripts/configure.ts) remain available for existing managed-directory installations, but are no longer the recommended setup.
+
+**Switching from the earlier shell installer?** Remove its Workflow Engine entries from both global `opencode.json` / `opencode.jsonc` and `tui.json` / `tui.jsonc` before using the native command. Keep unrelated plugins. OpenCode treats the old file entries and the Git package as different installations; `-f` does not remove the old entries.
 
 `/workflow-config` (also `/workflow_config`) opens native settings in OpenCode's terminal UI. `/workflows` opens run details and child sessions, with stop and skip controls.
 
@@ -286,7 +296,7 @@ The tools are `workflow`, `workflow_reference`, `workflow_runs`, `workflow_saved
 
 <table>
 <tr>
-<td width="33%" align="center"><h2>199</h2><p>unit tests passed</p></td>
+<td width="33%" align="center"><h2>207</h2><p>unit tests passed</p></td>
 <td width="33%" align="center"><h2>8</h2><p>real-server integration tests passed</p></td>
 <td width="33%" align="center"><h2>1.18.30</h2><p>OpenCode version verified</p></td>
 </tr>
@@ -317,7 +327,7 @@ Paid-provider behavior, plan quotas, terminal run-management interactions, and t
 bun install --frozen-lockfile
 bun run typecheck
 bun run test
-bun run build
+bun run bundle
 ```
 
 For the isolated OpenCode suite and package contents:
