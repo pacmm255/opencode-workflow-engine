@@ -1,6 +1,7 @@
 import type { ModelSelection } from "../models";
 import type { PreparedWorkflowPlan } from "../plan";
 import type { UltracodeRequest } from "../ultracode";
+import type { GoalOperation } from "../goal/state";
 
 export type Usage = { input: number; output: number; reasoning: number; cost: number };
 export const emptyUsage = (): Usage => ({ input: 0, output: 0, reasoning: 0, cost: 0 });
@@ -19,4 +20,5 @@ export type RunState = {
   launchAgent: string; launchModel: ModelSelection; notification?: "pending" | "delivered" | "failed";
   plan?: PreparedWorkflowPlan;
   ultracode?: UltracodeRequest;
+  goal?: { id: string; objectiveRevision: number; operation: GoalOperation };
 };

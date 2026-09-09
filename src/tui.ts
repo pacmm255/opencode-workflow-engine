@@ -7,6 +7,7 @@ import { catalogFromProviders, type ModelEntry } from "./core/models.ts";
 import { runsDirectory } from "./core/paths.ts";
 import { activeStatuses as active, plannedAgents, type AgentView, type RunView, type PlannedTaskView } from "./tui/sidebar-state";
 import { registerUltracodeControls } from "./tui/ultracode";
+import { registerGoalControls } from "./tui/goals";
 
 const runIDPattern = /^wf_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const agentIDPattern = /^[A-Za-z0-9_-]{1,100}$/;
@@ -338,10 +339,12 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
   }
 
   const ultracode = registerUltracodeControls(api, { local, perform, remoteRequest });
+  const goals = registerGoalControls(api, { local, perform, remoteRequest });
   const commands: TuiCommand[] = [
     { title: "Configure workflow models", value: "workflow.config", category: "Workflow", slash: { name: "workflow-config", aliases: ["workflow_config"] }, onSelect: () => perform(configuration) },
     { title: "View session workflows", value: "workflow.runs", category: "Workflow", slash: { name: "workflows" }, onSelect: () => perform(workflows) },
     ...ultracode.commands,
+    ...goals.commands,
   ];
   // This shape mirrors OpenCode 1.18's own command compatibility bridge.
   const unregister = typeof api.keymap?.registerLayer === "function" ? api.keymap.registerLayer({
@@ -350,11 +353,13 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
     })),
   }) : api.command?.register(() => commands);
   if (!unregister) api.ui.toast({ variant: "warning", message: "Native workflow commands are unavailable; use the server workflow tools." });
-  api.lifecycle.onDispose(() => { disposed = true; unregister?.(); ultracode.dispose(); });
+  api.lifecycle.onDispose(() => { disposed = true; unregister?.(); ultracode.dispose(); goals.dispose(); });
   // Hosts without sidebar slots still retain the native commands and controls.
   if (typeof api.slots?.register === "function") {
     const { registerWorkflowSidebar } = await import("./tui-sidebar");
     if (!disposed) registerWorkflowSidebar(api, {
+      goal: goals.get,
+      openGoal: goals.open,
       source: sessionID => ({
         metadata: () => runView(api.state.session.get(sessionID)?.metadata?.workflow, sessionID),
         ...(local ? { discover: () => localRuns(sessionID), read: (id: string) => readRun(id, sessionID) } : {}),

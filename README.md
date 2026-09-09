@@ -172,6 +172,28 @@ OpenCode can discover compatible skills from `.claude` directories. Workflow pla
 | `/workflow-dismiss` | Dismiss or restore automatic triggering for the next prompt. |
 | `/workflows` | View this session's runs and child sessions; use native stop and skip controls. |
 | `/workflow-stop [runId]` | Request stopping a specific run, or the latest active run in this session. |
+| `/workflow-goal <objective>` | Keep planning workflows until the objective has fresh acceptance evidence. |
+| `/workflow-goal [status\|history\|pause\|resume\|stop]` | Inspect or control this session's persistent goal. No arguments means status. |
+| `/workflow-goal edit <objective>` | Revise the goal and invalidate earlier acceptance checks. |
+| `/workflow-goals` | Native goal dashboard, acceptance checks, paginated history, and controls. |
+
+### Persistent workflow goals
+
+```text
+/workflow-goal Implement the requested feature, run its tests, and verify the actual application behavior. Do not publish changes.
+```
+
+The supervisor defines acceptance criteria, checks whether they are already met, then creates the next useful workflow for unmet requirements. Each workflow is followed by fresh independent verification. It continues until acceptance succeeds, you pause/stop it, or a prerequisite needs your input. It never treats a finished workflow alone as a finished goal.
+
+There is **no goal-wide token, cost, workflow-count, iteration, or duration ceiling**. Usage is informational. Individual workflows still have finite timeouts, agent/concurrency limits, cancellation, and normal OpenCode permissions. Starting a goal does not authorize publishing, destructive changes, or expanding its scope. Repeated recoverable failures back off without an aggregate retry cap; denied authority remains a blocker.
+
+Goal mode complements Ultracode: the goal determines **what must be achieved and when to stop**; Ultracode supplies workflow behavior and supported reasoning effort. Enable `/ultracode`, then start `/workflow-goal`. Goal-owned results go to one supervisor, without extra Ultracode continuation prompts. You can also use goals without enabling Ultracode. Coordinator stages use the first configured pool model, or the effective default/session model when the pool is empty; worker plans choose from the actual pool. Unavailable configured models wait for repair rather than silently switching providers.
+
+`/workflow-goals` (alias `/workflow_goals`) opens native controls without a model call. The singular `/workflow-goal` belongs to the server, preserving inline objective arguments. Pause cancels owned operations and retains a resumable goal; resume rechecks partial work. Stop permanently cancels the goal and retains its history. Stopping a goal-owned run in `/workflows` pauses its supervisor too. An explicit parent-session abort also pauses it; closing a dialog does not. A revised objective gets a new generation and checklist, so late results cannot satisfy the new objective.
+
+State and paginated history live in a separate SQLite database under OpenCode's workflow application-data directory, outside your repository. Reserved operation/run IDs and a project lease prevent duplicate scheduling across plugin instances. Active goals reconcile known children after restart; paused/cancelled goals stay stopped. OpenCode must be running with the project loaded—this is not a separate always-on daemon. Each project admits one goal operation at a time; pause active goals before independent workflows or parent edits. Use separate sessions for other goal/loop plugins: their internal state is not automatically detected or disabled.
+
+Completion requires one current evidence entry per criterion, a fresh verifier context, and matching workspace fingerprints before/after verification. Failed, skipped, missing, or malformed results cannot complete a goal. Direct verifier editing tools are disabled; validation commands retain normal host permissions. Git projects fingerprint tracked and nonignored files, including dirty/untracked content; non-Git projects exclude tool/config directories and `node_modules`. Ignored files, external systems, symlink targets, and submodule contents need explicit reviewer checks; a fingerprint is not proof of their freshness. Verification quality still depends on the selected model and available checks, not a guarantee of convergence or correctness. If final notification delivery is uncertain, inspect status/history; the supervisor does not blindly duplicate the notification.
 
 ### Automatic workflows with Ultracode
 
@@ -359,15 +381,15 @@ The tools are `workflow`, `workflow_reference`, `workflow_runs`, `workflow_saved
 
 <table>
 <tr>
-<td width="33%" align="center"><h2>314</h2><p>unit tests passed</p></td>
-<td width="33%" align="center"><h2>13</h2><p>real-server integration tests passed</p></td>
+<td width="33%" align="center"><h2>341</h2><p>unit tests passed</p></td>
+<td width="33%" align="center"><h2>14</h2><p>real-server integration tests passed</p></td>
 <td width="33%" align="center"><h2>1.18.30</h2><p>OpenCode version verified</p></td>
 </tr>
 </table>
 
 The integration harness starts a real OpenCode server with isolated configuration and a local deterministic model fixture. It checks actual child sessions, native structured output, resume, background survival, stop/skip, parent cancellation, and a retained git worktree.
 
-**15 real-terminal checks** exercise both configuration command spellings, connected-provider/model pages, persisted selections, global scope, and native Ultracode controls, then run plans through `/workflow`, a human keyword, and an ordinary session-mode prompt. They verify hidden setup instructions, live sidebar progress, automatic continuation through verification, and per-prompt dismissal. Opening settings still creates no chat sessions or model API requests.
+**19 real-terminal checks** exercise both configuration command spellings, connected-provider/model pages, persisted selections, global scope, and native Ultracode controls, then run plans through `/workflow`, a human keyword, and an ordinary session-mode prompt. They also start `/workflow-goal` with inline arguments, open its native controls, pause/resume real goal work, and observe independently verified completion with Ultracode enabled. Opening settings still creates no chat sessions or model API requests.
 
 **10 native-install checks** cover project/global registration, repeat installs, Git package installation without a build, generated authoring-guide discovery, and real child sessions from both inline and saved workflows. The exact private-GitHub project and global commands above were also verified with authenticated downloads and real-server execution.
 
@@ -381,6 +403,8 @@ Unit coverage includes model/config policy, schemas, replay, cancellation, timed
 Plan coverage additionally checks full-team preflight, model selection and rationale, dependency failures, exact model/variant preservation, and source-free replay. The real-server suite verifies hidden command instructions and rejection of unrelated loop-skill reads without changing ordinary sessions.
 
 Ultracode coverage checks human provenance, quoted/reference text, session persistence, per-prompt opt-out, exact reasoning variants, child recursion prevention, inherited permissions, and continuation only for the original request. Real-server fixtures exercise successive implementation/verification workflows and direct answers to simple questions. These are deterministic transport and lifecycle checks, not proof of every model's planning quality.
+
+Goal coverage includes 1,200 deterministic workflow cycles over simulated multi-day time without an aggregate ceiling, transactional ownership, duplicate wakeups, restart reconciliation, objective revisions, stale/missing evidence, permission failures, transport cancellation, and fresh verification without replay. The real-server goal test uses an offline acceptance oracle to exercise two successive workflows and exactly one final notification; it is not an independent assessment of model judgment.
 
 The installer is also checked in an isolated environment with a real dependency install and build, including a repeat install that preserves configuration without duplicate entries.
 
@@ -441,6 +465,7 @@ src/
     ├── config.ts      Validated, layered settings
     ├── models.ts      Connected catalog and model policy
     ├── reference.ts   Workflow authoring contract
+    ├── goal/          Durable objective, ownership, planning, and acceptance
     ├── script/        Literal metadata and syntax validation
     ├── runtime/       Worker, VM, and host protocol
     └── run/           Execution, persistence, replay, reporting

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto"
-import type { AssistantMessage, OpencodeClient, Part, SessionMessagesResponse2 } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, OpencodeClient, Part, PermissionRule, SessionMessagesResponse2 } from "@opencode-ai/sdk/v2"
 import { validateSchema } from "./schema.ts"
 
 export { UnsatisfiableSchemaError } from "./schema.ts"
@@ -23,7 +23,7 @@ export interface AgentExecutionInput {
   options: AgentExecutionOptions
   model: { providerID: string; modelID: string; variant?: string }
   signal?: AbortSignal
-  availableAgents?: readonly { name: string; mode?: string }[]
+  availableAgents?: readonly { name: string; mode?: string; permission?: readonly PermissionRule[] }[]
   workflow?: { runId: string; agentId: string }
   onSession?: (sessionID: string, directory: string) => void | Promise<void>
   /** Deltas, including usage from failed attempts and aborted children. */
@@ -65,7 +65,9 @@ const unwrap = <T>(result: { data?: T; error?: unknown }): T => {
   return result.data as T
 }
 const abortReason = (signal: AbortSignal): Error => signal.reason instanceof Error ? signal.reason : new DOMException(String(signal.reason ?? "Aborted"), "AbortError")
-const isFormatEncodingError = (error: unknown): boolean => /Expected OutputFormatJsonSchema/.test(message(error)) && /format/.test(message(error))
+// Large schemas truncate the host error before its trailing ["format"] path.
+// This exact class name, on the message-read route, identifies the encoding bug.
+const isFormatEncodingError = (error: unknown): boolean => /Expected OutputFormatJsonSchema/.test(message(error))
 function cancellable<T>(promise: PromiseLike<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(abortReason(signal))
   return new Promise((resolve, reject) => {
@@ -264,7 +266,7 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
         directory, parentID: input.parentID, title: `Workflow: ${input.prompt.slice(0, 80)}`, agent,
         model: { id: input.model.modelID, providerID: input.model.providerID, variant: input.model.variant },
         metadata: input.workflow ? { workflow: input.workflow } : undefined,
-        permission: [...(parent.permission ?? []),
+        permission: [...(input.availableAgents?.find(candidate => candidate.name === parent.agent)?.permission ?? []), ...(parent.permission ?? []),
           ...Object.entries(options.tools ?? {}).filter(([, enabled]) => !enabled).map(([permission]) => ({ permission, pattern: "*", action: "deny" as const })),
           { permission: "workflow*", pattern: "*", action: "deny" }, { permission: "task", pattern: "*", action: "deny" }],
       }, { signal }).then(async (response) => {

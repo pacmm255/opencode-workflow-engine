@@ -30,6 +30,10 @@ export type RunContext = {
   config: WorkflowConfig; catalog: ModelEntry[]; agents: Agent[];
   metadata?: (state: RunState) => void;
   ultracode?: UltracodeRequest;
+  /** Internal supervisor ownership; never accepted from the model-facing workflow tool. */
+  goal?: RunState["goal"];
+  guard?: () => void;
+  goalScope?: string;
 };
 const agentOptions = z.object({
   label: z.string().max(200).optional(), phase: z.string().max(200).optional(),
@@ -45,6 +49,8 @@ const agentOptions = z.object({
 type ActiveRun = { state: RunState; controller: AbortController; skips: Map<string, AbortController>; done: Promise<RunState> };
 
 export class RunManager {
+  admit?: (context: RunContext) => void;
+  onStop?: (state: RunState) => void;
   private active = new Map<string, ActiveRun>();
   private closing = false;
   private notifyTimer?: ReturnType<typeof setInterval>;
@@ -107,7 +113,7 @@ export class RunManager {
             await atomicJSON(join(state.runDir, "run.json"), state);
           }
         }
-        if (state.notification === "pending" && state.status !== "running") this.pending.set(id, state);
+        if (!state.goal && state.notification === "pending" && state.status !== "running") this.pending.set(id, state);
       } catch { /* Ignore unrelated projects and malformed records; get/status reports them directly. */ }
     }
     this.notifyTimer = setInterval(() => { void this.flushNotifications(); }, 1000);
@@ -130,11 +136,22 @@ export class RunManager {
     return rows.filter((row): row is RunState => !!row && (!sessionID || row.sessionID === sessionID)).sort((a, b) => b.startedAt - a.startedAt);
   }
 
-  async stop(id: string): Promise<void> {
+  /** Goal recovery calls this only after lease fencing and confirmed child cancellation. */
+  async reconcileInterrupted(id: string): Promise<void> {
+    if (this.active.has(id)) return;
+    const state = await this.get(id);
+    if (!state.goal || state.status !== "running") return;
+    state.status = "interrupted"; state.finishedAt = Date.now();
+    state.error = "Previous goal owner lost its lease; owned children were reconciled before replacement.";
+    await atomicJSON(join(state.runDir, "run.json"), state);
+  }
+
+  async stop(id: string, userInitiated = true): Promise<void> {
     const state = await this.get(id);
     if (state.status !== "running") return;
+    if (userInitiated) this.onStop?.(state);
     await this.writeControl(state, "STOP");
-    this.active.get(id)?.controller.abort(failure("RunAbortedError", "User stopped the workflow"));
+    this.active.get(id)?.controller.abort(failure("RunAbortedError", userInitiated ? "User stopped the workflow" : "Goal supervisor interrupted the workflow"));
   }
 
   async skip(id: string, agentID: string): Promise<void> {
@@ -149,9 +166,12 @@ export class RunManager {
 
   async start(input: WorkflowInput, context: RunContext): Promise<{ state: RunState; done: Promise<RunState> }> {
     if (this.closing) throw failure("RunAbortedError", "Plugin is shutting down");
+    this.admit?.(context);
+    context.guard?.();
     if (input.tokenBudget !== undefined && (!Number.isSafeInteger(input.tokenBudget) || input.tokenBudget < 0)) throw failure("WorkflowInputError", "tokenBudget must be a nonnegative integer");
     const saved = new SavedWorkflows(this.directory);
     const previous = input.resumeFromRunId ? await this.get(input.resumeFromRunId) : undefined;
+    if (previous?.goal && !context.goal) throw failure("GoalOwnershipError", "Use workflow_goal resume to preserve the goal contract and recheck partial work.");
     if (!input.plan && previous?.plan && [input.script, input.scriptPath, input.name].every((source) => source === undefined))
       input = { ...input, plan: previous.plan.request };
     if (input.plan && [input.script, input.scriptPath, input.name].some((source) => source !== undefined))
@@ -163,7 +183,8 @@ export class RunManager {
     if (previous) {
       cache = new ResumeCache(await new Journal(join(previous.runDir, "journal.jsonl")).read());
     }
-    const id = `wf_${randomUUID()}`;
+    const id = context.goal?.operation.runID ?? `wf_${randomUUID()}`;
+    validateRunID(id);
     const runDir = join(this.root, id);
     const controller = new AbortController();
     const state: RunState = {
@@ -173,8 +194,17 @@ export class RunManager {
       logs: [], warnings: [], resumeFromRunId: input.resumeFromRunId, launchAgent: context.agent, launchModel: context.model,
       ...(prepared ? { plan: prepared.plan } : {}),
       ...(context.ultracode ? { ultracode: context.ultracode } : {}),
+      ...(context.goal ? { goal: context.goal } : {}),
     };
     if (state.plan) state.phase = "Preparing";
+    this.admit?.(context);
+    context.guard?.();
+    if (context.goal) {
+      await mkdir(this.root, { recursive: true, mode: 0o700 });
+      // Reserved goal runs must never overwrite/relaunch an existing operation.
+      await mkdir(runDir, { mode: 0o700 });
+      context.guard?.();
+    }
     await mkdir(join(runDir, "agents"), { recursive: true, mode: 0o700 });
     await writeFile(state.scriptPath, script, { mode: 0o600 });
     await atomicJSON(join(runDir, "args.json"), input.args ?? null);
@@ -235,6 +265,8 @@ export class RunManager {
     const recordFailure = (error: unknown) => { if (state.logs.length < 1000) state.logs.push(errorText(error).slice(0, 8000)); };
     const callAgent = async (prompt: string, raw: Record<string, unknown>): Promise<unknown> => {
       checkAbort(controller.signal);
+      this.admit?.(context);
+      context.guard?.();
       const options = agentOptions.parse(raw);
       if (options.schema) validateSchema(options.schema);
       const agentType = options.agentType ?? context.config.defaults.agent;
@@ -271,6 +303,8 @@ export class RunManager {
         await persist();
         release = await semaphore.acquire(signal);
         checkAbort(signal);
+        this.admit?.(context);
+        context.guard?.();
         if (input.tokenBudget !== undefined && state.usage.output + state.usage.reasoning >= input.tokenBudget)
           throw failure("BudgetExceededError", `Output token budget ${input.tokenBudget} exhausted before dispatch`);
         row.status = "running";
@@ -283,6 +317,7 @@ export class RunManager {
             row.sessionID = sessionID; row.directory = directory;
             await journal.append({ type: "agent.session", agentId: row.id, sessionID, directory });
             await writeRow(); await persist();
+            context.guard?.();
           },
           onUsage: (delta) => { for (const key of ["input", "output", "reasoning", "cost"] as const) { row.usage[key] += delta[key]; state.usage[key] += delta[key]; } },
         });
@@ -337,7 +372,7 @@ export class RunManager {
       clearInterval(controls); clearInterval(progressTimer);
       context.abort?.removeEventListener("abort", abort);
       state.finishedAt = Date.now();
-      if (state.background) state.notification = "pending";
+      if (state.background && !state.goal) state.notification = "pending";
       try {
         await atomicJSON(join(state.runDir, "result.json"), state.result ?? null);
         await journal.append({ type: state.status === "completed" ? "run.done" : "run.error", status: state.status, error: state.error, usage: state.usage });
@@ -347,7 +382,7 @@ export class RunManager {
       await progress();
       toast(`Workflow ${state.status}: ${state.id}`, state.status === "completed" ? "success" : "error");
       this.active.delete(state.id);
-      if (state.background) { this.pending.set(state.id, structuredClone(state)); void this.flushNotifications(); }
+      if (state.background && !state.goal) { this.pending.set(state.id, structuredClone(state)); void this.flushNotifications(); }
     }
     return structuredClone(state);
   }

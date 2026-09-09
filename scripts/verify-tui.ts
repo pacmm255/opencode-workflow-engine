@@ -199,6 +199,13 @@ try {
   await keys("Escape");
   await waitFor("Ultracode controls close", value => !value.includes("Ultracode —"));
   passed("Native Ultracode controls enable and reset session mode without creating a chat");
+  await type("/workflow-goals");
+  await waitFor("goal controls completion", value => value.includes("View and control workflow goal"));
+  await keys("Enter");
+  await waitFor("native empty goal controls", value => value.includes("Workflow goal — none") && value.includes("Start a workflow goal"));
+  await keys("Escape");
+  await waitFor("goal controls close", value => !value.includes("Workflow goal — none"));
+  passed("Native goal controls are present without creating a session or model request");
   assert.deepEqual((await patch(projectConfig)).models?.allowed, ["fixture/family/reviewer"], "Later settings must preserve the selected pool and must not add text-only models");
   assert.deepEqual(fixture.requests, [], "Native settings must never make model API requests");
   const database = new Database(join(root, "data", "opencode", "opencode.db"), { readonly: true });
@@ -264,6 +271,43 @@ try {
   await waitFor("dismissed keyword gets direct answer", value => value.includes("Direct answer; no workflow needed."), 30_000);
   assert(!sidebar(screen).includes("Automatic session-mode"));
   passed("Per-prompt dismissal suppresses the keyword in a real terminal submission");
+
+  await newSession();
+  await ultracode(); await choose("Enable Ultracode");
+  await waitFor("goal session enables Ultracode", value => value.includes("on (next session)"));
+  await keys("Escape"); await waitFor("goal session controls close", value => !value.includes("Ultracode —"));
+  const criterion = "The goal fixture passes its acceptance check";
+  await writeFile(join(project, "goal-proof.txt"), "PASS: isolated goal acceptance fixture");
+  fixture.setAutomaticStages();
+  fixture.setToolCall("workflow_goal", { action: "start", objective: "Finish and verify the isolated goal fixture" });
+  fixture.setStructuredResult((_schema, prompt) => {
+    if (prompt.includes("WORKFLOW_GOAL_CONTRACT")) return { criteria: [criterion], summary: "Define goal fixture acceptance" };
+    if (prompt.includes("WORKFLOW_GOAL_PLAN")) return { decision: "workflow", summary: "Complete one fixture stage", reason: "One criterion remains", plan: {
+      summary: "Goal fixture work", tasks: [{ id: "goalwork", label: "Goal fixture work", task: "Inspect the isolated goal fixture", reason: "Use the configured review model", model: "fixture/family/reviewer", dependsOn: [] }],
+    } };
+    const cycle = Number(/"cycle":(\d+)/.exec(prompt)?.[1] ?? 0);
+    return { summary: cycle ? "Goal fixture verified" : "Work remains", blocker: "", evidence: [
+      { criterion, met: cycle >= 1, method: "Offline acceptance oracle", observation: cycle ? "PASS" : "UNMET", artifact: "goal-proof.txt" },
+    ] };
+  });
+  await type(`/workflow-goal ${PARENT_MARKER}: complete the goal fixture`);
+  await keys("Enter");
+  await waitFor("goal sidebar starts", value => sidebar(value).includes("Workflow goal") && sidebar(value).includes("defining"), 45_000);
+  await writeFile(join(root, "goal-running.txt"), screen);
+  passed("The singular goal command accepts inline arguments and shows a real running supervisor");
+  await type("/workflow-goals");
+  await waitFor("live goal controls completion", value => value.includes("View and control workflow goal"));
+  await keys("Enter");
+  await waitFor("live goal native controls", value => value.includes("Pause goal") && value.includes("Stop goal permanently"));
+  await choose("Pause goal");
+  await waitFor("goal paused persistently", value => value.includes("Workflow goal — paused"));
+  await choose("Resume goal");
+  await waitFor("goal resumed persistently", value => value.includes("Workflow goal — active"));
+  await keys("Escape"); await waitFor("goal dialog closes", value => !value.includes("Workflow goal — active"));
+  passed("Native pause and resume control the live supervisor without a chat tool call");
+  await waitFor("goal verified after resumed work", value => sidebar(value).includes("completed") && sidebar(value).includes("1/1 checks"), 90_000);
+  await writeFile(join(root, "goal-completed.txt"), screen);
+  passed("Goal mode and Ultracode coexist through resumed execution and independent acceptance");
   success = true;
   console.log(`\n${checks} real OpenCode TUI checks passed.`);
 } catch (error) {

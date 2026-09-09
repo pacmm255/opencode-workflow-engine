@@ -6,7 +6,7 @@ import type { PluginInput, ToolContext } from "@opencode-ai/plugin";
 import plugin from "../src/server.ts";
 import { defaultConfig, loadConfig } from "../src/core/config.ts";
 import { authoringSkillContent } from "../src/core/authoring-skill.ts";
-import { workflowInstruction } from "../src/core/commands.ts";
+import { goalInstruction, workflowInstruction } from "../src/core/commands.ts";
 import { UltracodeSessionStore, ultracodeOriginKey, workflowResultKey } from "../src/core/ultracode.ts";
 
 const previousConfigHome = process.env.XDG_CONFIG_HOME;
@@ -84,9 +84,48 @@ async function fixture(options: { malformed?: boolean; hold?: Promise<void>; par
 test("initializes through v1 transport and exposes workflow tools", async () => {
   const f = await fixture();
   expect(plugin.id).toBe("opencode-workflow-engine");
-  expect(Object.keys(f.hooks.tool ?? {}).sort()).toEqual(["workflow", "workflow_config", "workflow_mode", "workflow_reference", "workflow_runs", "workflow_saved"]);
+  expect(Object.keys(f.hooks.tool ?? {}).sort()).toEqual(["workflow", "workflow_config", "workflow_goal", "workflow_mode", "workflow_reference", "workflow_runs", "workflow_saved"]);
   expect(f.requests).toEqual([]);
   expect(await f.execute("workflow_reference", {})).toContain("agent(prompt");
+});
+
+test("workflow-goal is a server command with preserved arguments and no second Ultracode planner", async () => {
+  const f = await fixture();
+  await f.execute("workflow_mode", { action: "set", enabled: true });
+  const output = { parts: [{ type: "text", text: "Build and verify the requested feature" }] };
+  await f.hooks["command.execute.before"]?.({ command: "workflow-goal", sessionID: "ses_parent", arguments: output.parts[0]!.text }, output as any);
+  expect(output.parts[0]?.text).toBe("Build and verify the requested feature");
+  expect(output.parts[1]).toMatchObject({ text: goalInstruction, synthetic: true });
+  const raw = await f.chat("/workflow-goal ultracode build a feature", { human: true });
+  expect(JSON.stringify(raw)).toContain(goalInstruction);
+  expect(JSON.stringify(raw)).not.toContain("Ultracode workflow assistance is opted in");
+});
+
+test("goal tools persist lifecycle, never expose manual completion, and retain Ultracode settings", async () => {
+  const f = await fixture();
+  await f.execute("workflow_mode", { action: "set", enabled: true });
+  const started = JSON.parse(await f.execute("workflow_goal", { action: "start", objective: "Build the requested feature; do not publish" }));
+  expect(started.goal.mode).toBe("active");
+  expect(started.goal.originalObjective).toContain("do not publish");
+  await expect(f.execute("workflow_goal", { action: "start", objective: "Second goal" })).rejects.toThrow("already has a goal");
+  expect(JSON.parse(await f.execute("workflow_goal", { action: "pause" })).goal.mode).toBe("paused");
+  expect(JSON.parse(await f.execute("workflow_goal", { action: "resume" })).goal.mode).toBe("active");
+  expect(JSON.parse(await f.execute("workflow_mode", { action: "show" })).settings.enabled).toBe(true);
+  expect(JSON.parse(await f.execute("workflow_goal", { action: "stop" })).goal.mode).toBe("cancelled");
+  await expect(f.execute("workflow_goal", { action: "resume" })).rejects.toThrow("ended");
+  expect(JSON.parse(await f.execute("workflow_goal", { action: "history" })).events.length).toBeGreaterThan(3);
+});
+
+test("active goals suppress competing parent writes and survive compaction without rewriting the objective", async () => {
+  const f = await fixture();
+  await f.execute("workflow_goal", { action: "start", objective: "Implement within the existing scope" });
+  const output = await f.chat("What is the status?", { human: true });
+  expect(JSON.stringify(output)).toContain("goal owns execution");
+  await expect(f.hooks["tool.execute.before"]?.({ tool: "write", sessionID: "ses_parent", callID: "call" }, { args: {} })).rejects.toThrow("Pause the goal");
+  const compact = { context: [] as string[] };
+  await f.hooks["experimental.session.compacting"]?.({ sessionID: "ses_parent" }, compact);
+  expect(compact.context.join(" ")).toContain("Implement within the existing scope");
+  await f.execute("workflow_goal", { action: "pause" });
 });
 
 test("automatic keyword triggering requires trusted human metadata and stays one-shot", async () => {
@@ -179,7 +218,7 @@ test("config hook registers commands, subagent, and absolute skill path without 
   const config = { command: { workflow: existing } } as Parameters<NonNullable<typeof f.hooks.config>>[0];
   await f.hooks.config?.(config);
   expect(config.command?.workflow).toEqual(existing);
-  expect(Object.keys(config.command ?? {}).sort()).toEqual(["ultracode-chat", "workflow", "workflow-config-chat", "workflow-stop", "workflows-chat"]);
+  expect(Object.keys(config.command ?? {}).sort()).toEqual(["ultracode-chat", "workflow", "workflow-config-chat", "workflow-goal", "workflow-stop", "workflows-chat"]);
   for (const nativeName of ["workflow-config", "workflow_config", "workflows"]) {
     expect(config.command).not.toHaveProperty(nativeName);
   }

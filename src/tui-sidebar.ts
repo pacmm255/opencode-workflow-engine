@@ -3,6 +3,7 @@ import { createElement, insert, setProp } from "@opentui/solid";
 import { createEffect, createSignal, onCleanup, untrack, type JSX } from "solid-js";
 import { activeStatuses, createSidebarTracker, isActiveRun, plannedAgents, sidebarAgents, sidebarText,
   type RunView, type SidebarSnapshot, type SidebarSource } from "./tui/sidebar-state";
+import type { GoalState } from "./core/goal/state";
 
 type Child = string | ReturnType<typeof createElement> | (() => Child | Child[] | null);
 function element(tag: string, props: Record<string, unknown>, children: Child[] = []) {
@@ -16,6 +17,8 @@ export interface WorkflowSidebarOptions {
   source(sessionID: string): SidebarSource;
   open(run: RunView): void;
   showAll(): void;
+  goal?(sessionID: string): GoalState | undefined;
+  openGoal?(): void;
 }
 
 /** OpenCode owns slot unregistration; each mounted component owns its poller. */
@@ -35,9 +38,14 @@ export function registerWorkflowSidebar(api: TuiPluginApi, options: WorkflowSide
       sidebar_content(_context, props) {
         if (disposed) return null;
         const [state, setState] = createSignal<SidebarSnapshot>({ runs: [], unavailable: false });
+        const [goal, setGoal] = createSignal<GoalState>();
         createEffect(() => {
           const sessionID = props.session_id;
           setState({ runs: [], unavailable: false });
+          const refreshGoal = () => { try { setGoal(options.goal?.(sessionID)); } catch { /* Display cache only. */ } };
+          untrack(refreshGoal);
+          const goalTimer = setInterval(refreshGoal, 1000);
+          onCleanup(() => clearInterval(goalTimer));
           // The effect owns the session, not each reactive metadata snapshot.
           // Without untrack(), its initial poll would remount on every update.
           const tracker = untrack(() => createSidebarTracker(options.source(sessionID), setState));
@@ -47,7 +55,8 @@ export function registerWorkflowSidebar(api: TuiPluginApi, options: WorkflowSide
         const root = element("box", { flexDirection: "column", flexShrink: 0 });
         insert(root, () => {
           const snapshot = state();
-          if (!snapshot.runs.length || disposed) return null;
+          const currentGoal = goal();
+          if ((!snapshot.runs.length && !currentGoal) || disposed) return null;
           const theme = api.theme.current;
           const text = (value: string, color = theme.textMuted) => element("text", { fg: color, wrapMode: "word" }, [value]);
           const running = snapshot.runs.filter(isActiveRun).length;
@@ -72,6 +81,14 @@ export function registerWorkflowSidebar(api: TuiPluginApi, options: WorkflowSide
             ]);
           });
           return element("box", { flexDirection: "column" }, [
+            ...(currentGoal ? [element("box", { flexDirection: "column", paddingBottom: 1, onMouseDown: () => options.openGoal?.() }, [
+              text("Workflow goal", theme.text),
+              text(sidebarText(currentGoal.objective, 120)),
+              text(`${currentGoal.mode} · ${currentGoal.operation?.stage ?? currentGoal.stage}${currentGoal.operation && currentGoal.mode !== "active" ? " · stopping" : ""}`, currentGoal.mode === "completed" ? theme.success : theme.primary),
+              text(`${currentGoal.evidence.filter(item => item.met).length}/${currentGoal.criteria.length} checks · ${currentGoal.cycle} workflows`),
+              ...(currentGoal.reason ? [text(sidebarText(currentGoal.reason, 160), theme.warning)] : []),
+              text("/workflow-goals · controls"),
+            ])] : []),
             element("text", { fg: theme.text, onMouseDown: () => { if (!disposed) options.showAll(); } },
               [`Workflows${running ? ` · ${running} running` : ""}`]),
             ...rows,

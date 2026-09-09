@@ -6,6 +6,8 @@ import { pathToFileURL } from "node:url";
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2";
 import type { RunState } from "../src/core/run/state.ts";
 import { workflowInstruction } from "../src/core/commands.ts";
+import { GoalStore } from "../src/core/goal/store.ts";
+import { createHash } from "node:crypto";
 import { UltracodeSessionStore } from "../src/core/ultracode.ts";
 import { PARENT_MARKER, startModelFixture } from "./fixture.ts";
 
@@ -204,6 +206,54 @@ afterAll(async () => {
 }, 10_000);
 
 describe("built plugin in a real isolated OpenCode server", () => {
+  integration("workflow-goal command persists a multi-cycle supervisor alongside Ultracode and reports only final acceptance", async () => {
+    const criterion = "The isolated goal fixture has passed its acceptance check";
+    await writeFile(join(projectDirectory, "goal-proof.txt"), "PASS: offline acceptance fixture");
+    fixture!.setAutomaticStages();
+    fixture!.setToolCall("workflow_goal", { action: "start", objective: "Complete and verify the isolated goal fixture without unrelated changes" });
+    fixture!.setStructuredResult((_schema, prompt) => {
+      if (prompt.includes("WORKFLOW_GOAL_CONTRACT")) return { criteria: [criterion], summary: "Define the isolated acceptance check" };
+      if (prompt.includes("WORKFLOW_GOAL_PLAN")) return { decision: "workflow", summary: "Finish one fixture stage", reason: "Acceptance still needs another stage", plan: {
+        summary: "Goal fixture implementation", tasks: [{ id: "implement", label: "Goal implementation", task: "Inspect the isolated fixture; return the stage result", reason: "Connected fixture model for this bounded stage", model: "fixture/test", dependsOn: [] }],
+      } };
+      const cycle = Number(/"cycle":(\d+)/.exec(prompt)?.[1] ?? 0);
+      return { summary: cycle >= 2 ? "Goal fixture accepted" : "Another stage remains", blocker: "", evidence: [
+        { criterion, met: cycle >= 2, method: "Offline current-state acceptance oracle", observation: cycle >= 2 ? "PASS" : "UNMET", artifact: "goal-proof.txt" },
+      ] };
+    });
+    const { data: session } = await client.session.create({ directory: projectDirectory, title: "Workflow goal integration", agent: "build", model: { id: "test", providerID: "fixture" } }, { throwOnError: true });
+    await new UltracodeSessionStore(projectDirectory, join(suiteDirectory, "data", "opencode", "workflow", "ultracode-sessions"))
+      .set(session.id, { enabled: true, effort: "xhigh" });
+    const store = new GoalStore(projectDirectory, join(suiteDirectory, "data", "opencode", "workflow", "goals", createHash("sha256").update(projectDirectory).digest("hex")));
+    try {
+      await client.session.command({ directory: projectDirectory, sessionID: session.id, agent: "build", model: "fixture/test", command: "workflow-goal", arguments: `${PARENT_MARKER}: complete the isolated goal` }, { throwOnError: true });
+      const output = JSON.parse(await toolResult(session.id, "workflow_goal"));
+      expect(output.goal.mode).toBe("active");
+      const final = await poll("independent goal acceptance", async () => {
+        const goal = store.current(session.id);
+        if (goal?.mode === "blocked") throw new Error(`Goal blocked: ${goal.reason}`);
+        return goal?.mode === "completed" ? goal : undefined;
+      }, 60_000);
+      expect(final.cycle).toBe(2);
+      expect(final.evidence[0]?.met).toBe(true);
+      await poll("final goal notification", async () => store.current(session.id)?.notification === "delivered");
+      await parentIdle(session.id);
+      const rows = (await Promise.all((await readdir(runDirectory)).map(id => readRun(id).catch(() => undefined)))).filter(row => row?.sessionID === session.id);
+      expect(rows).toHaveLength(8);
+      expect(rows.every(row => row?.goal?.id === final.id && row.notification === undefined)).toBe(true);
+      expect(rows.filter(row => row?.plan)).toHaveLength(2);
+      expect(rows.every(row => row?.agents.every(agent => agent.model === "fixture/test/xhigh"))).toBe(true);
+      const { data: messages } = await client.session.messages({ directory: projectDirectory, sessionID: session.id }, { throwOnError: true });
+      expect(messages.flatMap(message => message.parts).filter(part => part.type === "text" && part.metadata?.workflowGoalResult)).toHaveLength(1);
+      expect(messages.flatMap(message => message.parts).some(part => part.type === "text" && part.metadata?.workflowResult)).toBe(false);
+      await childrenIdle(session.id);
+    } finally {
+      const goal = store.current(session.id);
+      if (goal && ["active", "blocked", "paused"].includes(goal.mode)) store.control(goal.id, "stop");
+      store.close(); fixture!.setStructuredResult({ answer: 42 }); fixture!.setAutomaticStages();
+    }
+  });
+
   const autoStage = (id: string) => ({ plan: { summary: `Automatic ${id}`, tasks: [
     { id, label: id, task: `Complete ${id} on the isolated fixture`, reason: "A focused stage with the connected tool-capable model", model: "fixture/test", dependsOn: [] },
   ] } });

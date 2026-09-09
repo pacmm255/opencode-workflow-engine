@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { UltracodeSessionStore } from "../src/core/ultracode";
+import { GoalStore } from "../src/core/goal/store";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import type { Provider } from "@opencode-ai/sdk/v2/types";
 import type { TuiCommand, TuiDialogAlertProps, TuiDialogConfirmProps, TuiDialogPromptProps, TuiDialogSelectProps, TuiPluginApi, TuiPluginMeta, TuiSlotPlugin } from "@opencode-ai/plugin/tui";
@@ -122,7 +123,7 @@ async function fixture(settings: { url?: string; legacy?: boolean; legacyTranspo
 test("registers native commands with keymap and unregisters on disposal", async () => {
   const f = await fixture();
   expect(plugin.id).toBe("opencode-workflow-engine-tui");
-  expect(f.commands.map((command) => command.slashName)).toEqual(["workflow-config", "workflows", "ultracode", "workflow-dismiss"]);
+  expect(f.commands.map((command) => command.slashName)).toEqual(["workflow-config", "workflows", "ultracode", "workflow-dismiss", "workflow-goals"]);
   expect(f.commands.find((command) => command.name === "workflow.config")?.slashAliases).toContain("workflow_config");
   f.dispose();
   expect(f.unregisterCount).toBe(1);
@@ -134,6 +135,37 @@ test("supports the installed legacy command API", async () => {
   const f = await fixture({ legacy: true });
   await f.slash("workflow_config");
   expect(f.dialog?.props.title).toBe("Workflow configuration (project)");
+});
+
+test("native goal controls persist pause/resume/stop without model or network calls", async () => {
+  const f = await fixture();
+  const store = new GoalStore(f.directory);
+  try {
+    const goal = store.create({ sessionID: "ses_parent", agent: "build", model: { providerID: "openai", modelID: "gpt-test" }, objective: "Verify a requested feature" });
+    await f.slash("workflow-goals");
+    expect(f.dialog?.props.title).toBe("Workflow goal — active");
+    await f.choose("pause"); expect(store.get(goal.id)?.mode).toBe("paused");
+    await f.choose("resume"); expect(store.get(goal.id)?.mode).toBe("active");
+    await f.choose("history"); expect(f.dialog?.props.title).toBe("Workflow goal history");
+    await f.choose("back");
+    await f.choose("stop");
+    expect(store.get(goal.id)?.mode).toBe("active");
+    if (f.dialog?.kind !== "confirm") throw new Error("Expected explicit stop confirmation");
+    await f.dialog.props.onConfirm?.();
+    await Bun.sleep(1);
+    expect(store.get(goal.id)?.mode).toBe("cancelled");
+    expect(f.requests).toHaveLength(0); expect(f.drafted).toHaveLength(0);
+  } finally { f.dispose(); store.close(); }
+});
+
+test("native goal creation drafts the singular server command without swallowing its arguments", async () => {
+  const f = await fixture({ home: true });
+  await f.slash("workflow_goals"); await f.choose("new");
+  if (f.dialog?.kind !== "prompt") throw new Error("Expected objective prompt");
+  await f.dialog.props.onConfirm?.("Build the feature and verify it"); await Bun.sleep(1);
+  expect(f.drafted).toEqual([{ directory: f.directory, text: "/workflow-goal Build the feature and verify it" }]);
+  expect(f.requests).toHaveLength(0);
+  f.dispose();
 });
 
 test("native Ultracode controls persist session preferences without chat or model calls", async () => {

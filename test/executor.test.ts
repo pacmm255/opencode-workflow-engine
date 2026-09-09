@@ -17,7 +17,7 @@ function assistant(child: Child, overrides: Partial<AssistantMessage> = {}, text
 function user(child: Child): SessionMessagesResponse2[number] {
   return { info: { id: child.prompts.at(-1)!.messageID, sessionID: child.id, role: "user", time: { created: 1 }, agent: "workflow-agent", model: { providerID: "provider", modelID: "model" } }, parts: [] }
 }
-function fake(snapshot: (child: Child) => Snapshot = (child) => ({ messages: [user(child), assistant(child)] }), behavior: { abortFails?: boolean; hangStatus?: boolean; createDelayMs?: number; worktreeFails?: boolean; formatEncodingBug?: boolean; parentPermission?: unknown[] } = {}) {
+function fake(snapshot: (child: Child) => Snapshot = (child) => ({ messages: [user(child), assistant(child)] }), behavior: { abortFails?: boolean; hangStatus?: boolean; createDelayMs?: number; worktreeFails?: boolean; formatEncodingBug?: boolean | string; parentPermission?: unknown[] } = {}) {
   const calls: { method: string; pathname: string; directory: string | null; body: any; limit: string | null }[] = []
   const children: Child[] = []
   let aborted = 0
@@ -28,7 +28,7 @@ function fake(snapshot: (child: Child) => Snapshot = (child) => ({ messages: [us
     const url = new URL(request.url)
     const body = request.method === "POST" ? await request.json().catch(() => ({})) : undefined
     calls.push({ method: request.method, pathname: url.pathname, directory: url.searchParams.get("directory"), body, limit: url.searchParams.get("limit") })
-    if (url.pathname === "/session/ses_parent") return Response.json({ id: "ses_parent", permission: behavior.parentPermission ?? [] })
+    if (url.pathname === "/session/ses_parent") return Response.json({ id: "ses_parent", agent: "build", permission: behavior.parentPermission ?? [] })
     if (url.pathname === "/global/event") {
       const body = new ReadableStream<Uint8Array>({ start(controller) { stream = controller; emit({ payload: { type: "server.connected", properties: {} } }) }, cancel() { stream = undefined } })
       return new Response(body, { headers: { "content-type": "text/event-stream" } })
@@ -59,7 +59,7 @@ function fake(snapshot: (child: Child) => Snapshot = (child) => ({ messages: [us
     if (url.pathname.endsWith("/message")) {
       const messages = snapshot(child).messages ?? []
       if (!behavior.formatEncodingBug) return Response.json(messages)
-      const encodingError = () => Response.json({ name: "UnknownError", data: { message: 'Expected OutputFormatJsonSchema, actual {type:"json_schema"} at [0]["info"]["format"]' } }, { status: 500 })
+      const encodingError = () => Response.json({ name: "UnknownError", data: { message: typeof behavior.formatEncodingBug === "string" ? behavior.formatEncodingBug : 'Expected OutputFormatJsonSchema, actual {type:"json_schema"} at [0]["info"]["format"]' } }, { status: 500 })
       if (url.searchParams.get("limit") !== "1") return encodingError()
       const index = Number(url.searchParams.get("before") ?? messages.length) - 1
       if (index < 0) return Response.json([])
@@ -99,6 +99,15 @@ describe("agent lifecycle over the real v2 HTTP transport", () => {
     const prompt = transport.calls.find((call) => call.pathname.endsWith("/prompt_async"))!.body
     expect(prompt.messageID).toMatch(/^msg_[a-f0-9]{26}$/)
     expect(prompt.model).toEqual({ providerID: "provider", modelID: "model" })
+  })
+
+  test("goal and workflow children retain the invoking primary agent's permission policy", async () => {
+    const transport = fake()
+    await executeAgent(input(transport.client, { availableAgents: [
+      { name: "workflow-agent", mode: "subagent" },
+      { name: "build", mode: "primary", permission: [{ permission: "edit", pattern: "protected/*", action: "deny" }] },
+    ] }))
+    expect(transport.calls.find(call => call.pathname === "/session")!.body.permission).toContainEqual({ permission: "edit", pattern: "protected/*", action: "deny" })
   })
 
   test("does not treat a retry or transient context error as terminal", async () => {
@@ -220,8 +229,9 @@ describe("agent lifecycle over the real v2 HTTP transport", () => {
     expect(transport.children[0].prompts).toHaveLength(2)
   })
 
-  test("OpenCode format encoding fallback pages assistant messages and waits through startup", async () => {
-    const transport = fake((child) => ({ messages: child.polls < 3 ? [user(child)] : [user(child), assistant(child, { finish: "tool-calls" }), assistant(child, { id: `${child.prompts[0].messageID}b`, structured: { answer: "valid" } })] }), { formatEncodingBug: true })
+  test.each([true, 'Expected OutputFormatJsonSchema, got {"type":"json_schema","schema":{"properties":{... (416 more chars)'])
+  ("OpenCode format encoding fallback pages assistant messages and waits through startup (%s)", async (formatEncodingBug) => {
+    const transport = fake((child) => ({ messages: child.polls < 3 ? [user(child)] : [user(child), assistant(child, { finish: "tool-calls" }), assistant(child, { id: `${child.prompts[0].messageID}b`, structured: { answer: "valid" } })] }), { formatEncodingBug })
     const result = await executeAgent(input(transport.client, { options: { schema, retries: 0 } }))
     expect(result).toMatchObject({ status: "completed", value: { answer: "valid" }, usage: { input: 20, output: 8, reasoning: 4, cost: 0.02 } })
     expect(transport.children[0].polls).toBe(3)

@@ -53,6 +53,7 @@ export function startModelFixture(options: ModelFixtureOptions = {}) {
   let workflowInput = options.workflowInput ?? { script: "return await agent('fixture child')" };
   let parentToolName = options.parentToolName ?? "workflow";
   let automaticStages = options.automaticStages;
+  let structuredResult = options.structuredResult;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -91,7 +92,7 @@ export function startModelFixture(options: ModelFixtureOptions = {}) {
         if (delay > 0) await Bun.sleep(delay);
         if (structuredTool) {
           const schema = structuredTool.function.parameters ?? {};
-          const value = typeof options.structuredResult === "function" ? options.structuredResult(schema, prompt) : options.structuredResult ?? schemaExample(schema);
+          const value = typeof structuredResult === "function" ? structuredResult(schema, prompt) : structuredResult ?? schemaExample(schema);
           toolCall = { name: structuredTool.function.name, arguments: JSON.stringify(value), id: `fixture_structured_${index}` };
         } else content = typeof options.childText === "function" ? options.childText(prompt) : options.childText ?? "fixture child reply";
       }
@@ -122,6 +123,7 @@ export function startModelFixture(options: ModelFixtureOptions = {}) {
     setWorkflowInput(input: Record<string, unknown>): void { workflowInput = input; },
     setToolCall(name: string, input: Record<string, unknown>): void { parentToolName = name; workflowInput = input; },
     setAutomaticStages(stages?: Record<string, unknown>[]): void { automaticStages = stages; parentToolName = "workflow"; },
+    setStructuredResult(value: ModelFixtureOptions["structuredResult"]): void { structuredResult = value; },
     stop(): void { void server.stop(true); },
   };
 }
