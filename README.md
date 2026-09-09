@@ -12,7 +12,7 @@ Compose multi-agent work in JavaScript.<br />Run it in real OpenCode child sessi
 
 [![OpenCode](https://img.shields.io/badge/OpenCode-1.18.29%2B-86b9d6?style=flat-square&labelColor=1c2229)](#quick-start) [![Bun](https://img.shields.io/badge/built_with-Bun-e7b786?style=flat-square&labelColor=1c2229)](#development) [![License](https://img.shields.io/badge/license-MIT-b8c4b7?style=flat-square&labelColor=1c2229)](LICENSE)
 
-**[Get started](#quick-start)** &nbsp; / &nbsp; **[Usage](#usage)** &nbsp; / &nbsp; **[See a workflow](#one-script-many-moving-parts)** &nbsp; / &nbsp; **[Choose models](#your-team-your-models)** &nbsp; / &nbsp; **[Resume work](#keep-the-work-youve-already-done)**
+**[Get started](#quick-start)** &nbsp; / &nbsp; **[Usage](#usage)** &nbsp; / &nbsp; **[See it running](#workflows-in-action)** &nbsp; / &nbsp; **[Choose models](#your-team-your-models)** &nbsp; / &nbsp; **[Resume work](#keep-the-work-youve-already-done)**
 
 </div>
 
@@ -130,9 +130,23 @@ Restart OpenCode after installation or an update. In the terminal UI, open the w
 
 `/workflow_config` is an alias for the same page. It opens directly—no chat prompt or model call.
 
+Settings save to the project by default. Choose **Save scope** first if you want global settings. You can also open this page from **Configure workflow models** in OpenCode's command palette.
+
 1. Select **Connected providers and model pool**.
 2. Choose an OpenCode connection, or **All connected models**.
 3. Select models to toggle them in the pool. `[x]` marks selected models; changes save immediately to the chosen project or global scope.
+
+<p align="center">
+  <a href="assets/workflow-config.png"><img src="assets/workflow-config.png" alt="The actual workflow-config connection picker in OpenCode, showing connected providers and their available models." width="832" /></a>
+</p>
+<p align="center"><sub>Your OpenCode connections, inside <code>/workflow-config</code>. Open any screenshot at full size.</sub></p>
+
+Captured in OpenCode 1.18.30 with the project's real provider connections. Only the dialog framing is cropped; the UI is unchanged.
+
+<p align="center">
+  <a href="assets/workflow-models.png"><img src="assets/workflow-models.png" alt="The actual connected provider's model list in OpenCode's workflow model-pool picker." width="832" /></a>
+</p>
+<p align="center"><sub>Browse a connection's real model catalog. Select a model to toggle it in the pool.</sub></p>
 
 **Default model** uses the same connection and model lists. The page also controls strict mode, advisory workflow size, and save scope. Its catalog comes from the same live provider data as OpenCode's `/models`, with deprecated models excluded. If the list is empty, use `/connect`, check `/models`, and reopen the workflow settings.
 
@@ -152,6 +166,22 @@ The model reads the authoring reference, writes a workflow, and runs it. Configu
 | `/workflow <task>` | Author and execute a workflow. |
 | `/workflows` | View this session's runs and child sessions; use native stop and skip controls. |
 | `/workflow-stop [runId]` | Request stopping a specific run, or the latest active run in this session. |
+
+### Workflows in action
+
+Open `/workflows`, then select a run to inspect its agents, models, and phases. Select an agent to open its child session. **Refresh workflows** reloads the status; the dialog is a snapshot, not a live sidebar.
+
+<p align="center">
+  <a href="assets/workflow-running.png"><img src="assets/workflow-running.png" alt="The actual Documentation review workflow just after starting, with two review agents queued on Z.AI Coding Plan's GLM-5.3." width="832" /></a>
+</p>
+<p align="center"><sub>Started · Two review agents queued on GLM-5.3.</sub></p>
+
+<p align="center">
+  <a href="assets/workflow-completed.png"><img src="assets/workflow-completed.png" alt="The same actual workflow after completion, with its completed child agents retained in OpenCode's run history." width="832" /></a>
+</p>
+<p align="center"><sub>Completed · Two independent reviews, followed by a summary. All three child results are retained.</sub></p>
+
+Both captures follow the same real GLM-5.3 workflow.
 
 <details>
 <summary><strong>Run your own script</strong></summary>
@@ -306,6 +336,8 @@ The integration harness starts a real OpenCode server with isolated configuratio
 
 **7 real-terminal checks** exercise both configuration command spellings, connected-provider and model pages, persisted pool/default selections, and global scope. They also verify that opening settings creates no chat sessions or model API requests.
 
+**10 native-install checks** cover project/global registration, repeat installs, Git package installation without a build, generated authoring-guide discovery, and real child sessions from both inline and saved workflows. The exact private-GitHub project and global commands above were also verified with authenticated downloads and real-server execution.
+
 <details>
 <summary><strong>Verification scope</strong></summary>
 
@@ -315,7 +347,9 @@ Unit coverage includes model/config policy, schemas, replay, cancellation, timed
 
 The installer is also checked in an isolated environment with a real dependency install and build, including a repeat install that preserves configuration without duplicate entries.
 
-Paid-provider behavior, plan quotas, terminal run-management interactions, and the web UI have not been tested. The live sidebar is not implemented.
+The README captures additionally exercise the real connected-provider/model pages, workflow status and child-session navigation, and a completed three-child workflow on Z.AI Coding Plan's GLM-5.3. This is a small read-only review, not broad provider compatibility or quota testing.
+
+Interactive stop/skip controls and the web UI have not been tested. The live sidebar is not implemented.
 
 </details>
 
@@ -344,6 +378,14 @@ bun run test:tui
 ```
 
 The TUI checks use isolated configuration and fixture connections; they do not use your provider credentials or make paid model calls.
+
+For native installation and source-only Git package verification, install Git and OpenCode, then:
+
+```sh
+bun run test:native
+```
+
+This uses isolated local Git and model fixtures. It does not use your GitHub credentials; the private-GitHub commands are checked separately.
 
 <details>
 <summary><strong>Find your way around the source</strong></summary>
