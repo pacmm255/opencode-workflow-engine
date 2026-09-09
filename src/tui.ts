@@ -5,30 +5,11 @@ import { join } from "node:path";
 import { loadConfig, resetConfig, saveConfig, type ConfigScope } from "./core/config.ts";
 import { catalogFromProviders, type ModelEntry } from "./core/models.ts";
 import { runsDirectory } from "./core/paths.ts";
+import { activeStatuses as active, plannedAgents, type AgentView, type RunView, type PlannedTaskView } from "./tui/sidebar-state";
+import { registerUltracodeControls } from "./tui/ultracode";
 
 const runIDPattern = /^wf_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const agentIDPattern = /^[A-Za-z0-9_-]{1,100}$/;
-const active = new Set(["running", "pending", "queued", "retrying", "starting"]);
-
-interface AgentView {
-  id: string;
-  label: string;
-  status: string;
-  model: string;
-  phase?: string;
-  sessionID?: string;
-}
-interface RunView {
-  id: string;
-  name: string;
-  status: string;
-  sessionID: string;
-  directory: string;
-  startedAt: number;
-  phase?: string;
-  agents: AgentView[];
-  error?: string;
-}
 
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -44,12 +25,24 @@ function runView(value: unknown, sessionID: string): RunView | undefined {
     agents.push({ id: item.id, status: item.status, label: item.label, model: item.model,
       ...(typeof item.phase === "string" ? { phase: item.phase } : {}),
       ...(typeof item.sessionID === "string" ? { sessionID: item.sessionID } : {}),
+      ...(typeof item.agentType === "string" ? { agentType: item.agentType } : {}),
+      ...(typeof item.selectionReason === "string" ? { selectionReason: item.selectionReason } : {}),
+      ...(typeof item.taskId === "string" ? { taskId: item.taskId } : {}),
     });
   }
   return { id: value.id, name: value.name, status: value.status, sessionID, directory: value.directory,
     startedAt: value.startedAt, agents,
     ...(typeof value.phase === "string" ? { phase: value.phase } : {}),
     ...(typeof value.error === "string" ? { error: value.error } : {}),
+    ...(object(value.plan) && typeof value.plan.summary === "string" ? { plan: { summary: value.plan.summary,
+      tasks: Array.isArray(value.plan.tasks) ? value.plan.tasks.flatMap((task): PlannedTaskView[] => {
+        if (!object(task) || typeof task.id !== "string" || !/^[a-zA-Z][a-zA-Z0-9_-]{0,79}$/.test(task.id) || typeof task.label !== "string"
+          || typeof task.model !== "string" || typeof task.reason !== "string" || !Array.isArray(task.dependsOn)) return [];
+        return [{ id: task.id, label: task.label, model: task.model, reason: task.reason,
+          dependsOn: task.dependsOn.filter((id): id is string => typeof id === "string"),
+          ...(typeof task.agentType === "string" ? { agentType: task.agentType } : {}) }];
+      }) : [],
+    } } : {}),
   };
 }
 
@@ -146,6 +139,8 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
       { title: `Default model: ${config.models.default}`, value: "default" },
       { title: `Strict model pool: ${config.models.strict ? "on" : "off"}`, value: "strict", description: "Inherited default/session model remains permitted" },
       { title: `Size guideline: ${config.sizeGuideline ?? "unrestricted"}`, value: "size" },
+      { title: `Ultracode by default: ${config.ultracode.enabled ? "on" : "off"}`, value: "ultracode-default", description: "Automatic workflows in new sessions" },
+      { title: `Ultracode keyword trigger: ${config.ultracode.keyword ? "on" : "off"}`, value: "ultracode-keyword", description: "One-shot opt-in from human prompts" },
       { title: `Save scope: ${scope}`, value: "scope", description: "Effective settings; project overrides global" },
       { title: `Reset ${scope} overrides`, value: "reset" },
       { title: "Done", value: "done" },
@@ -153,6 +148,12 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
       if (value === "models") return providerPicker("pool");
       if (value === "default") return providerPicker("default");
       if (value === "scope") { scope = scope === "project" ? "global" : "project"; return configuration(); }
+      if (value === "ultracode-default" || value === "ultracode-keyword") {
+        const latest = await loadConfig(directory(), globalDirectory());
+        const field = value === "ultracode-default" ? "enabled" : "keyword";
+        await saveConfig(directory(), { ultracode: { [field]: !latest.ultracode[field] } }, scope, globalDirectory());
+        return configuration();
+      }
       if (value === "strict") {
         const latest = await loadConfig(directory(), globalDirectory());
         await saveConfig(directory(), { models: { strict: !latest.models.strict } }, scope, globalDirectory());
@@ -277,9 +278,25 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
       title: `${run.name} — ${run.status}`, value: run.id, description: `${run.id}${run.phase ? ` · ${run.phase}` : ""}`, footer: `${run.agents.length} agents`,
     })), (id) => { const run = values.get(id); if (run) runDetails(run); });
   }
+  async function localRuns(sessionID: string): Promise<RunView[]> {
+    const ids = await readdir(runsDirectory()).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    const runs: RunView[] = [];
+    const candidates = ids.filter(id => runIDPattern.test(id));
+    for (let offset = 0; offset < candidates.length && !disposed; offset += 4) {
+      await Promise.all(candidates.slice(offset, offset + 4).map(async id => {
+        try { runs.push(await readRun(id, sessionID)); }
+        catch { /* Foreign sessions and malformed records are not sidebar data. */ }
+      }));
+    }
+    return runs;
+  }
   function runDetails(run: RunView) {
+    const agents = plannedAgents(run);
     select(`${run.name} — ${run.status}`, [
-      ...run.agents.map((agent) => ({ title: `${agent.label} — ${agent.status}`, value: agent.id, category: agent.phase ?? "Agents", description: agent.model })),
+      ...agents.map((agent) => ({ title: `${agent.label} — ${agent.status}`, value: agent.id, category: agent.phase ?? "Agents", description: agent.model })),
       { title: "Stop workflow", value: "__stop", category: "Manage", disabled: !active.has(run.status) },
       { title: "Refresh workflows", value: "__back", category: "Manage" },
       ...(run.error ? [{ title: "Show error", value: "__error", category: "Manage" }] : []),
@@ -293,17 +310,19 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
         api.ui.dialog.clear();
         return;
       }
-      const agent = run.agents.find((agent) => agent.id === value);
+      const agent = agents.find((agent) => agent.id === value);
       if (agent) agentDetails(run, agent);
     });
   }
   function agentDetails(run: RunView, agent: AgentView) {
     select(`${agent.label} — ${agent.status}`, [
       { title: "Open child session", value: "open", disabled: !agent.sessionID },
-      { title: "Skip this agent", value: "skip", disabled: !active.has(agent.status) || !active.has(run.status) },
+      { title: "Skip this agent", value: "skip", disabled: !run.agents.some(row => row.id === agent.id) || !active.has(agent.status) || !active.has(run.status) },
+      ...(agent.selectionReason ? [{ title: "Why this agent and model", value: "reason", description: agent.selectionReason }] : []),
       { title: "Back to workflow", value: "back" },
     ], async (value) => {
       if (value === "back") { runDetails(run); return; }
+      if (value === "reason") { alert(agent.label, `${agent.model}${agent.agentType ? ` · ${agent.agentType}` : ""}\n\n${agent.selectionReason}`); return; }
       if (value === "open" && agent.sessionID) {
         api.ui.dialog.clear();
         api.route.navigate("session", { sessionID: agent.sessionID });
@@ -318,9 +337,11 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
     });
   }
 
+  const ultracode = registerUltracodeControls(api, { local, perform, remoteRequest });
   const commands: TuiCommand[] = [
     { title: "Configure workflow models", value: "workflow.config", category: "Workflow", slash: { name: "workflow-config", aliases: ["workflow_config"] }, onSelect: () => perform(configuration) },
     { title: "View session workflows", value: "workflow.runs", category: "Workflow", slash: { name: "workflows" }, onSelect: () => perform(workflows) },
+    ...ultracode.commands,
   ];
   // This shape mirrors OpenCode 1.18's own command compatibility bridge.
   const unregister = typeof api.keymap?.registerLayer === "function" ? api.keymap.registerLayer({
@@ -329,7 +350,19 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
     })),
   }) : api.command?.register(() => commands);
   if (!unregister) api.ui.toast({ variant: "warning", message: "Native workflow commands are unavailable; use the server workflow tools." });
-  api.lifecycle.onDispose(() => { disposed = true; unregister?.(); });
+  api.lifecycle.onDispose(() => { disposed = true; unregister?.(); ultracode.dispose(); });
+  // Hosts without sidebar slots still retain the native commands and controls.
+  if (typeof api.slots?.register === "function") {
+    const { registerWorkflowSidebar } = await import("./tui-sidebar");
+    if (!disposed) registerWorkflowSidebar(api, {
+      source: sessionID => ({
+        metadata: () => runView(api.state.session.get(sessionID)?.metadata?.workflow, sessionID),
+        ...(local ? { discover: () => localRuns(sessionID), read: (id: string) => readRun(id, sessionID) } : {}),
+      }),
+      open: run => { void perform(() => runDetails(run)); },
+      showAll: () => { void perform(workflows); },
+    });
+  }
 };
 
 export default { id: "opencode-workflow-engine-tui", tui: WorkflowTuiPlugin } satisfies TuiPluginModule;

@@ -8,12 +8,12 @@ import { reference } from "./reference";
 /** Generated from the runtime contract, never from local development notes. */
 export const authoringSkillContent = `---
 name: workflow-authoring
-description: Design and run JavaScript workflows with parallel agents, pipelines, structured output, and resumable execution in OpenCode.
+description: Plan a focused team from configured models and run workflows with live progress, dependencies, and resumable execution in OpenCode.
 ---
 
 # Workflow authoring
 
-Read workflow_reference before writing a workflow to include the current model catalog and configuration guidance.
+Read workflow_reference before choosing the team to obtain the current model catalog and configured subagent roles. Normal tasks use a declarative plan; the engine creates orchestration privately. Do not write temporary workflow scripts or load unrelated loop/scheduling skills.
 
 ${reference}`;
 

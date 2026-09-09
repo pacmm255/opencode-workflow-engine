@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { PARENT_MARKER, startModelFixture } from "../e2e/fixture.ts";
 
 /**
  * Real keyboard-and-screen regression checks, not a mock of the plugin API.
@@ -22,11 +23,10 @@ const projectConfig = join(project, ".opencode", "workflow.json");
 const globalConfig = join(config, "workflow.json");
 const log = join(root, "data", "opencode", "log", "opencode.log");
 const subprocessEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C.UTF-8", TERM: "xterm-256color" };
-const requests: string[] = [];
 let screen = "";
 let success = false;
 let checks = 0;
-let fixture: ReturnType<typeof Bun.serve> | undefined;
+let fixture: ReturnType<typeof startModelFixture> | undefined;
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -82,6 +82,18 @@ async function settings(alias: "workflow_config" | "workflow-config"): Promise<v
   await writeFile(join(root, `${alias}.txt`), screen);
 }
 
+async function ultracode(): Promise<void> {
+  await type("/ultracode");
+  await waitFor("Ultracode completion", value => value.includes("Configure Ultracode"));
+  await keys("Enter");
+  await waitFor("native Ultracode controls", value => value.includes("Enable Ultracode") && value.includes("Use configured default"));
+}
+
+async function newSession(): Promise<void> {
+  await keys("C-x", "n");
+  await waitFor("new session home", value => !value.includes("Workflows") && value.includes("commands"));
+}
+
 async function patch(file: string): Promise<{ models?: { allowed?: string[]; default?: string; strict?: boolean } }> {
   return JSON.parse(await readFile(file, "utf8"));
 }
@@ -95,17 +107,12 @@ try {
   const dist = resolve(import.meta.dir, "../dist");
   await Promise.all([readFile(join(dist, "server.js")), readFile(join(dist, "tui.js"))]);
   await Promise.all([project, config, join(root, "data"), join(root, "cache"), join(root, "state")].map(directory => mkdir(directory, { recursive: true })));
-  fixture = Bun.serve({
-    hostname: "127.0.0.1", port: 0,
-    fetch(request) {
-      requests.push(new URL(request.url).pathname);
-      return Response.json({ error: { message: "This UI-only check must not invoke a model." } }, { status: 400 });
-    },
-  });
-  const baseModel = { limit: { context: 32_000, output: 4096 }, cost: { input: 0, output: 0 }, tool_call: true };
+  fixture = startModelFixture({ childDelayMs: 4500, childText: "Verified the isolated sidebar fixture." });
+  const baseModel = { limit: { context: 32_000, output: 4096 }, cost: { input: 0, output: 0 }, tool_call: true,
+    variants: { high: { reasoningEffort: "high" }, xhigh: { reasoningEffort: "xhigh" } } };
   const provider = (name: string, models: Record<string, unknown>) => ({
     npm: "@ai-sdk/openai-compatible", name,
-    options: { baseURL: `${fixture!.url.origin}/v1`, apiKey: "isolated-fixture-only" }, models,
+    options: { baseURL: `${fixture!.url}/v1`, apiKey: "isolated-fixture-only" }, models,
   });
   await writeFile(join(config, "opencode.json"), JSON.stringify({
     plugin: [pathToFileURL(join(dist, "server.js")).href],
@@ -183,14 +190,80 @@ try {
   passed("Global scope saves to the isolated global config without overwriting project settings");
 
   await keys("Escape");
+  await waitFor("settings to close before the live run", value => !value.includes("Workflow configuration ("));
+  await ultracode();
+  await choose("Enable Ultracode");
+  await waitFor("Ultracode enabled for the next session", value => value.includes("on (next session)"));
+  await choose("Use configured default");
+  await waitFor("Ultracode reset", value => value.includes("off (next session)"));
+  await keys("Escape");
+  await waitFor("Ultracode controls close", value => !value.includes("Ultracode —"));
+  passed("Native Ultracode controls enable and reset session mode without creating a chat");
   assert.deepEqual((await patch(projectConfig)).models?.allowed, ["fixture/family/reviewer"], "Later settings must preserve the selected pool and must not add text-only models");
-  assert.deepEqual(requests, [], "Native settings must never make model API requests");
+  assert.deepEqual(fixture.requests, [], "Native settings must never make model API requests");
   const database = new Database(join(root, "data", "opencode", "opencode.db"), { readonly: true });
   try {
     const row = database.query("SELECT COUNT(*) AS count FROM session").get() as { count: number };
     assert.equal(row.count, 0, "Native settings must never create chat sessions");
   } finally { database.close(); }
   passed("No chat sessions or model API requests were created");
+
+  fixture.setWorkflowInput({ plan: { summary: "Sidebar live verification", tasks: [
+    { id: "inspect", label: "Inspect task", task: "Inspect the isolated sidebar fixture.", reason: "Connected reviewer matches inspection work.", model: "fixture/family/reviewer", dependsOn: [] },
+    { id: "verify", label: "Verify task", task: "Verify the inspection result.", reason: "Fresh review checks the dependency result.", model: "fixture/family/reviewer", dependsOn: ["inspect"] },
+  ] } });
+  await type(`/workflow ${PARENT_MARKER}: run the configured workflow tool once.`);
+  await keys("Enter");
+  const sidebar = (value: string) => value.split("\n").map(line => Array.from(line).slice(90).join("")).join("\n");
+  await waitFor("live workflow sidebar", value => sidebar(value).includes("Workflows") && sidebar(value).includes("Inspect task"), 45_000);
+  assert(!screen.includes("Session workflows"), "Live progress must be visible without opening the workflow dialog");
+  await writeFile(join(root, "sidebar-running.txt"), screen);
+  assert(!screen.includes("This is an OpenCode /workflow request"), "Internal workflow instructions must not be rendered as the user's task");
+  passed("The real OpenCode sidebar shows the active workflow without opening /workflows");
+  await waitFor("dependency agent starts in sidebar", value => sidebar(value).includes("1/2 agents finished") && sidebar(value).includes("Verify task"), 25_000);
+  await writeFile(join(root, "sidebar-verifying.txt"), screen);
+  passed("Live sidebar updates agent progress and dependency execution automatically");
+  await waitFor("workflow completes in sidebar", value => sidebar(value).includes("2/2 agents finished") && sidebar(value).includes("completed"), 25_000);
+  await writeFile(join(root, "sidebar-completed.txt"), screen);
+  assert(fixture.requests.length >= 3, "The live check must execute real OpenCode parent and child sessions through the isolated fixture");
+  passed("Live sidebar keeps the real completed result and exact connected model visible");
+
+  await newSession();
+  const stage = (id: string) => ({ plan: { summary: `Automatic ${id}`, tasks: [
+    { id, label: id, task: `Complete the isolated ${id} stage`, reason: "One focused stage on the selected connected model", model: "fixture/family/reviewer", dependsOn: [] },
+  ] } });
+  fixture.setAutomaticStages([stage("implementation"), stage("verification")]);
+  await type(`${PARENT_MARKER}: ultracode implement and verify this fixture`);
+  await keys("Enter");
+  await waitFor("keyword starts implementation without a slash command", value => sidebar(value).includes("Automatic implementation"), 45_000);
+  assert(!screen.includes("Ultracode workflow assistance is opted in"), "Automatic setup must remain hidden");
+  passed("Human terminal keyword starts a workflow without /workflow or a visible script");
+  await waitFor("automatic verification starts", value => sidebar(value).includes("Automatic verification"), 30_000);
+  await waitFor("automatic stages finish", value => value.includes("Requested work verified complete."), 30_000);
+  passed("The real terminal continues from implementation to verification without another user prompt");
+
+  await newSession();
+  await ultracode();
+  await choose("Enable Ultracode");
+  await waitFor("session mode is enabled", value => value.includes("on (next session)"));
+  await keys("Escape");
+  await waitFor("Ultracode closes before task", value => !value.includes("Ultracode —"));
+  fixture.setAutomaticStages([stage("session-mode")]);
+  await type(`${PARENT_MARKER}: implement the fixture using the current session setting`);
+  await keys("Enter");
+  await waitFor("session mode handles ordinary task", value => sidebar(value).includes("Automatic session-mode"), 30_000);
+  await waitFor("session task completes", value => value.includes("Requested work verified complete."), 30_000);
+  passed("Session Ultracode mode automatically handles a plain task without the keyword");
+
+  await newSession();
+  await type("/workflow-dismiss");
+  await waitFor("dismiss command completion", value => value.includes("Dismiss or restore workflow trigger"));
+  await keys("Enter");
+  await type(`${PARENT_MARKER}: ultracode this trigger is dismissed`);
+  await keys("Enter");
+  await waitFor("dismissed keyword gets direct answer", value => value.includes("Direct answer; no workflow needed."), 30_000);
+  assert(!sidebar(screen).includes("Automatic session-mode"));
+  passed("Per-prompt dismissal suppresses the keyword in a real terminal submission");
   success = true;
   console.log(`\n${checks} real OpenCode TUI checks passed.`);
 } catch (error) {
@@ -200,6 +273,6 @@ try {
   throw error;
 } finally {
   await command(["kill-server"], true).catch(() => {});
-  await fixture?.stop(true);
+  fixture?.stop();
   if (success) await rm(root, { recursive: true, force: true });
 }

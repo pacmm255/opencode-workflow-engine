@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Provider, ProviderListResponse } from "@opencode-ai/sdk/v2/types";
 import { defaultConfig, type WorkflowConfig } from "../src/core/config.ts";
 import {
-  catalogFromProviders, modelDescription, ModelNotAllowedError, ModelUnavailableError,
+  catalogFromProviders, modelDescription, modelPlanningCatalog, ModelNotAllowedError, ModelUnavailableError,
   resolveModel, VariantNotFoundError, type ModelEntry,
 } from "../src/core/models.ts";
 
@@ -30,10 +30,69 @@ describe("connected model catalog", () => {
     expect(catalogFromProviders(snapshot)).toEqual([{
       id: "openrouter/anthropic/claude-sonnet-4", providerID: "openrouter", modelID: "anthropic/claude-sonnet-4",
       name: "Sonnet", providerName: "OpenRouter", variants: ["high", "max"], toolcall: true,
+      capabilities: { reasoning: null, attachment: null, input: null, output: null },
+      cost: { input: null, output: null, cacheRead: null, cacheWrite: null, tiered: false },
+      limits: { context: null, input: null, output: null },
     }]);
   });
   test("accepts config.providers filtered snapshots without an auth-only connected list", () => {
     expect(catalogFromProviders({ providers: [provider] })).toEqual(catalogFromProviders([provider]));
+  });
+  test("copies capability, price, and context metadata without provider credentials", () => {
+    const detailed = { ...provider, key: "provider-secret", options: { apiKey: "options-secret" }, models: {
+      detailed: { name: "Detailed", family: "demo", status: "active", capabilities: {
+        toolcall: true, reasoning: true, attachment: true, input: { text: true, image: true, audio: false }, output: { text: true },
+      }, cost: { input: 0, output: 2.5, cache: { read: 0.1, write: 1 }, tiers: [{ input: 4 }] },
+      limit: { context: 128000, input: 120000, output: 8000 }, options: { apiKey: "model-secret" }, headers: { Authorization: "secret" } },
+    } } as unknown as Provider;
+    const [entry] = catalogFromProviders([detailed]);
+    expect(entry).toMatchObject({ family: "demo", status: "active",
+      capabilities: { reasoning: true, attachment: true, input: ["image", "text"], output: ["text"] },
+      cost: { input: 0, output: 2.5, cacheRead: 0.1, cacheWrite: 1, tiered: true },
+      limits: { context: 128000, input: 120000, output: 8000 },
+    });
+    expect(JSON.stringify(entry)).not.toContain("secret");
+  });
+  test("missing and malformed costs stay unknown rather than becoming zero", () => {
+    const incomplete = { ...provider, models: {
+      unknown: { name: "Unknown", capabilities: {}, cost: { input: Number.NaN, output: -1, cache: { read: Infinity } },
+        limit: { context: 0, output: -1 } },
+    } } as unknown as Provider;
+    expect(catalogFromProviders([incomplete])[0]).toMatchObject({ toolcall: false,
+      cost: { input: null, output: null, cacheRead: null, cacheWrite: null, tiered: false },
+      limits: { context: null, input: null, output: null },
+    });
+  });
+});
+
+describe("autonomous model planning", () => {
+  test("only the configured, tool-capable, non-deprecated pool is offered", () => {
+    const cfg = config();
+    const choices = [model("demo", "usable"), { ...model("demo", "text-only"), toolcall: false },
+      { ...model("demo", "retired"), status: "deprecated" }, model("demo", "outside")];
+    cfg.models.allowed = ["demo/usable", "demo/text-only", "demo/retired", "missing/model"];
+    expect(modelPlanningCatalog(cfg, choices).map((entry) => entry.id)).toEqual(["demo/usable"]);
+    cfg.models.strict = true;
+    expect(modelPlanningCatalog(cfg, choices).map((entry) => entry.id)).toEqual(["demo/usable"]);
+    cfg.models.allowed = [];
+    expect(modelPlanningCatalog(cfg, choices)).toEqual([]);
+  });
+  test("guidance distinguishes price evidence from unknown/free assumptions and avoids default-only planning", () => {
+    const cfg = config();
+    cfg.models.allowed = ["other/plain"];
+    const description = modelDescription(cfg, catalog);
+    expect(description).toContain("input unknown, output unknown");
+    expect(description).toContain("unknown is not free");
+    expect(description).toContain("reported $0 is not proof of free service");
+    expect(description).toContain("not a recommendation to assign the session model to every task");
+    expect(description).toContain("Honor an explicit user request");
+    expect(description).toContain("Do not invent capability rankings");
+  });
+  test("an unusable nonempty pool is not silently treated as unrestricted", () => {
+    const cfg = config();
+    cfg.models.allowed = ["missing/model"];
+    expect(modelDescription(cfg, catalog)).toContain("no configured allowed model is currently usable");
+    expect(modelDescription(cfg, catalog)).toContain("do not silently select an unrelated connected model");
   });
 });
 

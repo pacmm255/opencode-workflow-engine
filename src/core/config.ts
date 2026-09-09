@@ -31,6 +31,7 @@ const defaultsSchema = z.strictObject({
   effort: effortSchema.nullable(),
 });
 const uiSchema = z.strictObject({ toasts: z.boolean() });
+const ultracodeSchema = z.strictObject({ enabled: z.boolean(), keyword: z.boolean() });
 
 export const configSchema = z.strictObject({
   models: modelsSchema,
@@ -38,6 +39,7 @@ export const configSchema = z.strictObject({
   defaults: defaultsSchema,
   sizeGuideline: positiveInteger.nullable(),
   ui: uiSchema,
+  ultracode: ultracodeSchema,
 });
 export type WorkflowConfig = z.infer<typeof configSchema>;
 
@@ -47,6 +49,7 @@ export const configPatchSchema = z.strictObject({
   defaults: defaultsSchema.partial().optional(),
   sizeGuideline: positiveInteger.nullable().optional(),
   ui: uiSchema.partial().optional(),
+  ultracode: ultracodeSchema.partial().optional(),
 });
 export type ConfigPatch = z.infer<typeof configPatchSchema>;
 export type ConfigScope = "project" | "global";
@@ -65,6 +68,7 @@ export const defaultConfig: WorkflowConfig = {
   defaults: { agent: "workflow-agent", retries: 1, effort: null },
   sizeGuideline: 15,
   ui: { toasts: true },
+  ultracode: { enabled: false, keyword: true },
 };
 
 export class ConfigError extends Error {
@@ -122,6 +126,7 @@ function mergePatches(base: ConfigPatch, patch: ConfigPatch): ConfigPatch {
     ...(base.limits || patch.limits ? { limits: { ...base.limits, ...patch.limits } } : {}),
     ...(base.defaults || patch.defaults ? { defaults: { ...base.defaults, ...patch.defaults } } : {}),
     ...(base.ui || patch.ui ? { ui: { ...base.ui, ...patch.ui } } : {}),
+    ...(base.ultracode || patch.ultracode ? { ultracode: { ...base.ultracode, ...patch.ultracode } } : {}),
   };
 }
 

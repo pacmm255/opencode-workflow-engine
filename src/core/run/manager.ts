@@ -8,6 +8,7 @@ import { effortSchema, type WorkflowConfig } from "../config";
 import { checkAbort, errorText, failure } from "../errors";
 import { resolveModel, type ModelEntry, type ModelSelection } from "../models";
 import { runsDirectory, validateRunID } from "../paths";
+import { preparePlan, type WorkflowPlan } from "../plan";
 import { SavedWorkflows } from "../saved";
 import { parseScript } from "../script/meta";
 import { runScript } from "../runtime/host";
@@ -17,18 +18,22 @@ import { atomicJSON, cacheKey, Journal, ResumeCache } from "./journal";
 import { report } from "./report";
 import { Semaphore } from "./semaphore";
 import { emptyUsage, type AgentState, type RunState } from "./state";
+import { workflowResultKey, type UltracodeRequest } from "../ultracode";
 
 export type WorkflowInput = {
   script?: string; scriptPath?: string; name?: string; args?: unknown; resumeFromRunId?: string;
   background?: boolean; description?: string; tokenBudget?: number;
+  plan?: WorkflowPlan;
 };
 export type RunContext = {
   sessionID: string; agent: string; model: ModelSelection; abort?: AbortSignal;
   config: WorkflowConfig; catalog: ModelEntry[]; agents: Agent[];
   metadata?: (state: RunState) => void;
+  ultracode?: UltracodeRequest;
 };
 const agentOptions = z.object({
   label: z.string().max(200).optional(), phase: z.string().max(200).optional(),
+  taskId: z.string().max(80).optional(), selectionReason: z.string().max(1000).optional(),
   model: z.string().optional(), effort: effortSchema.optional(), variant: z.string().optional(),
   agentType: z.string().optional(), schema: z.record(z.string(), z.unknown()).optional(),
   isolation: z.literal("worktree").optional(), system: z.string().optional(),
@@ -146,11 +151,16 @@ export class RunManager {
     if (this.closing) throw failure("RunAbortedError", "Plugin is shutting down");
     if (input.tokenBudget !== undefined && (!Number.isSafeInteger(input.tokenBudget) || input.tokenBudget < 0)) throw failure("WorkflowInputError", "tokenBudget must be a nonnegative integer");
     const saved = new SavedWorkflows(this.directory);
-    const script = await saved.load(input);
+    const previous = input.resumeFromRunId ? await this.get(input.resumeFromRunId) : undefined;
+    if (!input.plan && previous?.plan && [input.script, input.scriptPath, input.name].every((source) => source === undefined))
+      input = { ...input, plan: previous.plan.request };
+    if (input.plan && [input.script, input.scriptPath, input.name].some((source) => source !== undefined))
+      throw failure("WorkflowInputError", "Provide a plan OR exactly one script source, not both");
+    const prepared = input.plan ? preparePlan(input.plan, context) : undefined;
+    const script = prepared?.script ?? await saved.load(input);
     const { meta } = parseScript(script);
     let cache = new ResumeCache([]);
-    if (input.resumeFromRunId) {
-      const previous = await this.get(input.resumeFromRunId);
+    if (previous) {
       cache = new ResumeCache(await new Journal(join(previous.runDir, "journal.jsonl")).read());
     }
     const id = `wf_${randomUUID()}`;
@@ -161,7 +171,10 @@ export class RunManager {
       directory: this.directory, runDir, scriptPath: join(runDir, "script.js"), startedAt: Date.now(), ownerPID: process.pid,
       background: input.background ?? false, phases: meta.phases?.map((phase) => phase.title) ?? [], agents: [], usage: emptyUsage(),
       logs: [], warnings: [], resumeFromRunId: input.resumeFromRunId, launchAgent: context.agent, launchModel: context.model,
+      ...(prepared ? { plan: prepared.plan } : {}),
+      ...(context.ultracode ? { ultracode: context.ultracode } : {}),
     };
+    if (state.plan) state.phase = "Preparing";
     await mkdir(join(runDir, "agents"), { recursive: true, mode: 0o700 });
     await writeFile(state.scriptPath, script, { mode: 0o600 });
     await atomicJSON(join(runDir, "args.json"), input.args ?? null);
@@ -179,6 +192,12 @@ export class RunManager {
     const pending = new Set<Promise<unknown>>();
     let persistTail = Promise.resolve();
     const persist = () => {
+      if (state.plan) {
+        const running = [...new Set(state.agents.filter((agent) => agent.status === "running").map((agent) => agent.phase ?? agent.label))];
+        state.phase = running.length ? running.slice(0, 3).join(" + ")
+          : state.status !== "running" ? state.status
+          : state.agents.length < state.plan.tasks.length ? "Waiting for tasks" : "Finalizing";
+      }
       const snapshot = structuredClone(state);
       persistTail = persistTail.then(() => atomicJSON(join(state.runDir, "run.json"), snapshot));
       return persistTail;
@@ -221,7 +240,9 @@ export class RunManager {
       const agentType = options.agentType ?? context.config.defaults.agent;
       const agent = context.agents.find((candidate) => candidate.name === agentType);
       if (!agent || agent.mode === "primary") throw failure("AgentConfigurationError", `Agent is unavailable as a subagent: ${agentType}`);
-      const model = resolveModel({ config: context.config, catalog: context.catalog, sessionModel: context.model,
+      const planned = state.plan?.tasks.find((task) => task.id === options.taskId);
+      if (state.plan && !planned) throw failure("WorkflowPlanError", "Task was not validated in the workflow plan");
+      const model = planned?.selectedModel ?? resolveModel({ config: context.config, catalog: context.catalog, sessionModel: context.model,
         requested: options.model, agentModel: options.agentType && agent.model ? { ...agent.model, variant: agent.variant } : undefined,
         effort: options.effort ?? context.config.defaults.effort ?? undefined,
         variant: options.variant, onWarning: warn });
@@ -232,6 +253,7 @@ export class RunManager {
         throw failure("BudgetExceededError", `Output token budget ${input.tokenBudget} exhausted`);
       const sequence = state.agents.length + 1;
       const row: AgentState = { id: `a_${sequence}`, sequence, label: options.label ?? `Agent ${sequence}`, phase: options.phase,
+        taskId: options.taskId, selectionReason: options.selectionReason, agentType,
         model: `${model.providerID}/${model.modelID}${model.variant ? `/${model.variant}` : ""}`,
         status: cached.hit ? "cached" : "queued", usage: emptyUsage() };
       state.agents.push(row);
@@ -345,7 +367,8 @@ export class RunManager {
             agent: parent.agent ?? state.launchAgent,
             model: current ? { providerID: current.providerID, modelID: current.id } : state.launchModel,
             variant: current ? (current.variant === "default" ? undefined : current.variant) : state.launchModel.variant,
-            parts: [{ type: "text", synthetic: true, text: `<workflow_result runId="${state.id}" state="${state.status}">\n${report(state)}\n</workflow_result>` }],
+            parts: [{ type: "text", synthetic: true, metadata: { [workflowResultKey]: state.id },
+              text: `<workflow_result runId="${state.id}" state="${state.status}">\n${report(state)}\n</workflow_result>` }],
           }, { throwOnError: true, signal }));
           state.notification = "delivered";
           await atomicJSON(join(state.runDir, "run.json"), state);

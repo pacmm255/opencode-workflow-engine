@@ -19,6 +19,7 @@ export interface ModelFixtureOptions {
   childText?: string | ((prompt: string) => string);
   structuredResult?: Record<string, unknown> | ((schema: Record<string, unknown>, prompt: string) => Record<string, unknown>);
   childDelayMs?: number | ((prompt: string) => number);
+  automaticStages?: Record<string, unknown>[];
 }
 
 /** Include this marker in the parent prompt; children never need to know it. */
@@ -51,6 +52,7 @@ export function startModelFixture(options: ModelFixtureOptions = {}) {
   let sequence = 0;
   let workflowInput = options.workflowInput ?? { script: "return await agent('fixture child')" };
   let parentToolName = options.parentToolName ?? "workflow";
+  let automaticStages = options.automaticStages;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -72,7 +74,16 @@ export function startModelFixture(options: ModelFixtureOptions = {}) {
       let toolCall: { name: string; arguments: string; id: string } | undefined;
       let content: string | undefined;
       const index = ++sequence;
-      if (parent && !hasWorkflowResult) {
+      if (parent && automaticStages) {
+        const instructions = body.messages.map(message => textContent(message.content)).join("\n");
+        const optedIn = instructions.includes("Ultracode workflow assistance is opted in for this request");
+        const completed = userMessages.filter(message => textContent(message.content).includes("<workflow_result ")).length;
+        const launched = body.messages.filter(message => message.role === "tool" && message.tool_call_id?.startsWith("fixture_workflow_")).length;
+        if (optedIn && !prompt.includes("SIMPLE_QUESTION") && launched === completed && completed < automaticStages.length) {
+          toolCall = { name: "workflow", arguments: JSON.stringify(automaticStages[completed]), id: `fixture_workflow_${index}` };
+        } else content = !optedIn || prompt.includes("SIMPLE_QUESTION") ? "Direct answer; no workflow needed."
+          : completed >= automaticStages.length ? "Requested work verified complete." : "The workflow is running; its result will arrive automatically.";
+      } else if (parent && !hasWorkflowResult) {
         toolCall = { name: workflowTool!.function.name, arguments: JSON.stringify(workflowInput), id: `fixture_workflow_${index}` };
       } else if (parent) content = "Fixture workflow finished.";
       else {
@@ -110,6 +121,7 @@ export function startModelFixture(options: ModelFixtureOptions = {}) {
     requests,
     setWorkflowInput(input: Record<string, unknown>): void { workflowInput = input; },
     setToolCall(name: string, input: Record<string, unknown>): void { parentToolName = name; workflowInput = input; },
+    setAutomaticStages(stages?: Record<string, unknown>[]): void { automaticStages = stages; parentToolName = "workflow"; },
     stop(): void { void server.stop(true); },
   };
 }

@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Spaceship</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0a0a1a; overflow: hidden; }
+  canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="game" width="480" height="640"></canvas>
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  const state = {
+    running: false,
+    score: 0,
+    lives: 3,
+    wave: 0,
+    ship: null,
+    bullets: [],
+    enemies: [],
+    enemyBullets: [],
+    particles: [],
+    keys: {},
+    spawnTimer: 0,
+    enemySpeed: 1,
+    shootCooldown: 0,
+  };
+
+  function reset() {
+    state.score = 0;
+    state.lives = 3;
+    state.wave = 0;
+    state.bullets = [];
+    state.enemies = [];
+    state.enemyBullets = [];
+    state.particles = [];
+    state.spawnTimer = 0;
+    state.enemySpeed = 1;
+    state.shootCooldown = 0;
+    state.ship = { x: W / 2, y: H - 60, w: 34, h: 24, speed: 5 };
+    state.running = true;
+    nextWave();
+  }
+
+  function nextWave() {
+    state.wave++;
+    state.enemySpeed = 1 + (state.wave - 1) * 0.35;
+    const cols = Math.min(5 + state.wave, 10);
+    const rows = Math.min(2 + Math.floor(state.wave / 2), 4);
+    const spacingX = 46, spacingY = 44;
+    const startX = (W - (cols - 1) * spacingX) / 2;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        state.enemies.push({
+          x: startX + c * spacingX,
+          y: 40 + r * spacingY,
+          w: 28, h: 20,
+          dir: 1,
+          shootChance: 0.0015 + state.wave * 0.0004,
+        });
+      }
+    }
+  }
+
+  function shoot() {
+    if (state.shootCooldown <= 0) {
+      state.bullets.push({ x: state.ship.x, y: state.ship.y - state.ship.h / 2, vy: -8 });
+      state.shootCooldown = 12;
+    }
+  }
+
+  function explode(x, y, color) {
+    for (let i = 0; i < 14; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = 1 + Math.random() * 3;
+      state.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 30, color });
+    }
+  }
+
+  function hitShip() {
+    state.lives--;
+    explode(state.ship.x, state.ship.y, '#4df');
+    state.ship.x = W / 2;
+    state.ship.y = H - 60;
+    state.enemyBullets = [];
+    if (state.lives <= 0) state.running = false;
+  }
+
+  function update() {
+    const s = state.ship, k = state.keys;
+    if (k.ArrowLeft || k.a || k.A) s.x -= s.speed;
+    if (k.ArrowRight || k.d || k.D) s.x += s.speed;
+    if (k.ArrowUp || k.w || k.W) s.y -= s.speed;
+    if (k.ArrowDown || k.s || k.S) s.y += s.speed;
+    s.x = Math.max(s.w / 2, Math.min(W - s.w / 2, s.x));
+    s.y = Math.max(H / 2, Math.min(H - s.h / 2, s.y));
+    if (k[' ']) shoot();
+    if (state.shootCooldown > 0) state.shootCooldown--;
+
+    state.bullets = state.bullets.filter(b => {
+      b.y += b.vy;
+      return b.y > -10;
+    });
+
+    for (const e of state.enemies) {
+      if (Math.random() < e.shootChance) {
+        state.enemyBullets.push({ x: e.x, y: e.y + e.h / 2, vy: 3.5 });
+      }
+    }
+    state.enemyBullets = state.enemyBullets.filter(b => {
+      b.y += b.vy;
+      return b.y < H + 10;
+    });
+
+    // Enemy movement: descend on wall hit
+    let bounce = false;
+    for (const e of state.enemies) {
+      e.x += e.dir * state.enemySpeed;
+      if (e.x < e.w / 2 || e.x > W - e.w / 2) bounce = true;
+    }
+    if (bounce) {
+      for (const e of state.enemies) {
+        e.dir *= -1;
+        e.y += 16;
+      }
+    }
+
+    // Bullet-enemy collisions
+    for (const b of state.bullets) {
+      for (let i = state.enemies.length - 1; i >= 0; i--) {
+        const e = state.enemies[i];
+        if (Math.abs(b.x - e.x) < e.w / 2 + 3 && Math.abs(b.y - e.y) < e.h / 2 + 6) {
+          explode(e.x, e.y, '#f84');
+          state.score += 10;
+          state.enemies.splice(i, 1);
+          b.y = -100;
+          break;
+        }
+      }
+    }
+
+    // Enemy bullets / bodies hit ship
+    for (let i = state.enemyBullets.length - 1; i >= 0; i--) {
+      const b = state.enemyBullets[i];
+      if (Math.abs(b.x - s.x) < s.w / 2 && Math.abs(b.y - s.y) < s.h / 2) {
+        state.enemyBullets.splice(i, 1);
+        hitShip();
+        if (!state.running) return;
+      }
+    }
+    for (let i = state.enemies.length - 1; i >= 0; i--) {
+      const e = state.enemies[i];
+      if (Math.abs(e.x - s.x) < (e.w + s.w) / 2 && Math.abs(e.y - s.y) < (e.h + s.h) / 2) {
+        state.enemies.splice(i, 1);
+        hitShip();
+        if (!state.running) return;
+      }
+    }
+
+    // Enemies reach bottom = lose a life
+    for (let i = state.enemies.length - 1; i >= 0; i--) {
+      if (state.enemies[i].y > H - 30) {
+        state.enemies.splice(i, 1);
+        hitShip();
+        if (!state.running) return;
+      }
+    }
+
+    state.particles = state.particles.filter(p => {
+      p.x += p.vx; p.y += p.vy; p.life--;
+      return p.life > 0;
+    });
+
+    if (state.enemies.length === 0) nextWave();
+  }
+
+  function drawShip(x, y) {
+    ctx.fillStyle = '#4df';
+    ctx.beginPath();
+    ctx.moveTo(x, y - 14);
+    ctx.lineTo(x + 17, y + 10);
+    ctx.lineTo(x, y + 4);
+    ctx.lineTo(x - 17, y + 10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x - 2, y - 6, 4, 8);
+  }
+
+  function drawEnemy(e) {
+    ctx.fillStyle = '#f84';
+    ctx.beginPath();
+    ctx.moveTo(e.x - 14, e.y - 10);
+    ctx.lineTo(e.x + 14, e.y - 10);
+    ctx.lineTo(e.x + 7, e.y + 10);
+    ctx.lineTo(e.x - 7, e.y + 10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#201';
+    ctx.fillRect(e.x - 6, e.y - 5, 4, 4);
+    ctx.fillRect(e.x + 2, e.y - 5, 4, 4);
+  }
+
+  function draw() {
+    // Background
+    ctx.fillStyle = '#0a0a1a';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff';
+    for (let i = 0; i < 40; i++) {
+      const x = (i * 97 + ((Date.now() / 20 + i * 31) % H)) % W;
+      const y = (i * 53 + Date.now() / 30) % H;
+      ctx.fillRect(x, y, 2, 2);
+    }
+
+    if (state.running) {
+      for (const b of state.bullets) {
+        ctx.fillStyle = '#ff4';
+        ctx.fillRect(b.x - 2, b.y - 6, 4, 12);
+      }
+      for (const b of state.enemyBullets) {
+        ctx.fillStyle = '#f47';
+        ctx.fillRect(b.x - 2, b.y - 5, 4, 10);
+      }
+      for (const e of state.enemies) drawEnemy(e);
+      drawShip(state.ship.x, state.ship.y);
+      for (const p of state.particles) {
+        ctx.globalAlpha = p.life / 30;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x, p.y, 3, 3);
+        ctx.globalAlpha = 1;
+      }
+    } else {
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 42px monospace';
+      ctx.fillText('GAME OVER', W / 2, H / 2 - 30);
+      ctx.font = '20px monospace';
+      ctx.fillText('Score: ' + state.score, W / 2, H / 2 + 10);
+      ctx.fillText('Press ENTER to restart', W / 2, H / 2 + 50);
+    }
+
+    // HUD
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#fff';
+    ctx.font = '16px monospace';
+    ctx.fillText('Score: ' + state.score, 10, 24);
+    ctx.fillText('Wave: ' + state.wave, 10, 44);
+    ctx.textAlign = 'right';
+    ctx.fillText('Lives: ' + '♥'.repeat(Math.max(0, state.lives)), W - 10, 24);
+    ctx.textAlign = 'left';
+  }
+
+  function loop() {
+    if (state.running) update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  window.addEventListener('keydown', e => {
+    state.keys[e.key] = true;
+    if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) e.preventDefault();
+    if (e.key === ' ' && state.running) shoot();
+    if (e.key === 'Enter' && !state.running) reset();
+  });
+  window.addEventListener('keyup', e => { state.keys[e.key] = false; });
+
+  reset();
+  loop();
+})();
+</script>
+</body>
+</html>

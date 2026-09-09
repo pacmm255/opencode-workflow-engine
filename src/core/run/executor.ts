@@ -257,13 +257,16 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
     const timer = setTimeout(() => controller.abort(new AgentTimeoutError(`Agent timed out after ${timeoutMs} ms`)), timeoutMs)
     const signal = input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal
     try {
+      const parent = unwrap(await cancellable(client.session.get({ sessionID: input.parentID, directory: input.directory }, { signal }), signal))
       if (options.isolation === "worktree") directory = await createWorktree(input, signal, (createdDirectory) => { directory = createdDirectory })
       sessionCreationUncertain = true
       const creation = client.session.create({
         directory, parentID: input.parentID, title: `Workflow: ${input.prompt.slice(0, 80)}`, agent,
         model: { id: input.model.modelID, providerID: input.model.providerID, variant: input.model.variant },
         metadata: input.workflow ? { workflow: input.workflow } : undefined,
-        permission: [{ permission: "workflow*", pattern: "*", action: "deny" }, { permission: "task", pattern: "*", action: "deny" }],
+        permission: [...(parent.permission ?? []),
+          ...Object.entries(options.tools ?? {}).filter(([, enabled]) => !enabled).map(([permission]) => ({ permission, pattern: "*", action: "deny" as const })),
+          { permission: "workflow*", pattern: "*", action: "deny" }, { permission: "task", pattern: "*", action: "deny" }],
       }, { signal }).then(async (response) => {
         sessionCreationUncertain = false
         if (signal.aborted && response.data?.id) {
@@ -284,7 +287,9 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
         promptSubmitted = true
         unwrap(await cancellable(client.session.promptAsync({
           sessionID, directory, messageID: userID, agent, model: input.model, variant: input.model.variant,
-          system: options.system, tools: { ...options.tools, workflow: false, task: false },
+          // OpenCode's legacy tools map REPLACES session permissions. Keep the
+          // inherited rules on the child; optional tool flags may only narrow them.
+          system: options.system,
           format: options.schema ? { type: "json_schema", schema: options.schema } : undefined,
           parts: [{ type: "text", text: prompt }],
         }, { signal }), signal))

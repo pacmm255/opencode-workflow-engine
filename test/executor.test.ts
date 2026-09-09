@@ -17,7 +17,7 @@ function assistant(child: Child, overrides: Partial<AssistantMessage> = {}, text
 function user(child: Child): SessionMessagesResponse2[number] {
   return { info: { id: child.prompts.at(-1)!.messageID, sessionID: child.id, role: "user", time: { created: 1 }, agent: "workflow-agent", model: { providerID: "provider", modelID: "model" } }, parts: [] }
 }
-function fake(snapshot: (child: Child) => Snapshot = (child) => ({ messages: [user(child), assistant(child)] }), behavior: { abortFails?: boolean; hangStatus?: boolean; createDelayMs?: number; worktreeFails?: boolean; formatEncodingBug?: boolean } = {}) {
+function fake(snapshot: (child: Child) => Snapshot = (child) => ({ messages: [user(child), assistant(child)] }), behavior: { abortFails?: boolean; hangStatus?: boolean; createDelayMs?: number; worktreeFails?: boolean; formatEncodingBug?: boolean; parentPermission?: unknown[] } = {}) {
   const calls: { method: string; pathname: string; directory: string | null; body: any; limit: string | null }[] = []
   const children: Child[] = []
   let aborted = 0
@@ -28,6 +28,7 @@ function fake(snapshot: (child: Child) => Snapshot = (child) => ({ messages: [us
     const url = new URL(request.url)
     const body = request.method === "POST" ? await request.json().catch(() => ({})) : undefined
     calls.push({ method: request.method, pathname: url.pathname, directory: url.searchParams.get("directory"), body, limit: url.searchParams.get("limit") })
+    if (url.pathname === "/session/ses_parent") return Response.json({ id: "ses_parent", permission: behavior.parentPermission ?? [] })
     if (url.pathname === "/global/event") {
       const body = new ReadableStream<Uint8Array>({ start(controller) { stream = controller; emit({ payload: { type: "server.connected", properties: {} } }) }, cancel() { stream = undefined } })
       return new Response(body, { headers: { "content-type": "text/event-stream" } })
@@ -77,6 +78,15 @@ const input = (client: AgentExecutionInput["client"], overrides: Partial<AgentEx
 const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false }
 
 describe("agent lifecycle over the real v2 HTTP transport", () => {
+  test("child permissions preserve parent rules and tool flags cannot grant new access", async () => {
+    const permission = [{ permission: "read", pattern: "private/*", action: "deny" }, { permission: "bash", pattern: "*", action: "ask" }]
+    const transport = fake(undefined, { parentPermission: permission })
+    await executeAgent(input(transport.client, { options: { tools: { read: true, edit: false, workflow: true } } }))
+    const creation = transport.calls.find(call => call.pathname === "/session")!.body
+    expect(creation.permission).toEqual([...permission, { permission: "edit", pattern: "*", action: "deny" },
+      { permission: "workflow*", pattern: "*", action: "deny" }, { permission: "task", pattern: "*", action: "deny" }])
+    expect(transport.calls.find(call => call.pathname.endsWith("/prompt_async"))!.body).not.toHaveProperty("tools")
+  })
   test("requires idle after a completed response and counts usage only once", async () => {
     const transport = fake((child) => ({ status: child.polls < 3 ? "busy" : undefined, messages: [user(child), assistant(child)] }))
     const deltas: unknown[] = []
@@ -155,10 +165,14 @@ describe("agent lifecycle over the real v2 HTTP transport", () => {
 
   test("external skip aborts and resolves null; run cancellation aborts and throws", async () => {
     for (const name of ["AgentSkippedError", "RunAbortedError"]) {
-      const transport = fake((child) => ({ status: "busy", messages: [user(child)] }))
       const controller = new AbortController()
       const reason = Object.assign(new Error("stop"), { name })
-      const running = executeAgent(input(transport.client, { signal: controller.signal, onSession: () => { setTimeout(() => controller.abort(reason), 5) } }))
+      let scheduled = false
+      const transport = fake((child) => {
+        if (!scheduled && child.polls > 0) { scheduled = true; setTimeout(() => controller.abort(reason), 0) }
+        return { status: "busy", messages: [user(child)] }
+      })
+      const running = executeAgent(input(transport.client, { signal: controller.signal }))
       if (name === "AgentSkippedError") expect(await running).toMatchObject({ status: "skipped", value: null })
       else await expect(running).rejects.toBe(reason)
       expect(transport.aborted).toBe(1)
@@ -261,7 +275,8 @@ describe("agent lifecycle over the real v2 HTTP transport", () => {
     transport.readyEarly()
     const result = await executeAgent(input(transport.client, { options: { isolation: "worktree", retries: 0 } }))
     expect(result).toMatchObject({ status: "completed", directory: "/worktree" })
-    expect(transport.calls.filter((call) => call.pathname.startsWith("/session")).every((call) => call.directory === "/worktree")).toBe(true)
+    expect(transport.calls.filter((call) => call.pathname.startsWith("/session") && call.pathname !== "/session/ses_parent").every((call) => call.directory === "/worktree")).toBe(true)
+    expect(transport.calls.find(call => call.pathname === "/session/ses_parent")?.directory).toBe("/project")
     expect(transport.calls.some((call) => call.method === "DELETE")).toBe(false)
   })
 

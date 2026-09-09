@@ -10,6 +10,24 @@ export interface ModelEntry {
   providerName: string;
   variants: string[];
   toolcall: boolean;
+  /** Provider catalog metadata, not measured quality or a billing guarantee. */
+  status?: string;
+  family?: string;
+  capabilities?: {
+    reasoning: boolean | null;
+    attachment: boolean | null;
+    input: string[] | null;
+    output: string[] | null;
+  };
+  /** OpenCode reports USD per million tokens. Missing prices remain unknown. */
+  cost?: {
+    input: number | null;
+    output: number | null;
+    cacheRead: number | null;
+    cacheWrite: number | null;
+    tiered: boolean;
+  };
+  limits?: { context: number | null; input: number | null; output: number | null };
 }
 
 export interface ModelSelection {
@@ -19,6 +37,23 @@ export interface ModelSelection {
 }
 
 type ProviderSnapshot = ProviderListResponse | { providers: Provider[] } | Provider[];
+
+function nonnegative(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function positive(value: unknown): number | null {
+  const number = nonnegative(value);
+  return number !== null && number > 0 ? number : null;
+}
+
+function knownBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function modalities(value: Record<string, boolean> | undefined): string[] | null {
+  return value ? Object.entries(value).filter(([, enabled]) => enabled === true).map(([name]) => name).sort() : null;
+}
 
 /** Prefer config.providers()'s filtered providers; provider.list() is supported too. */
 export function catalogFromProviders(data: ProviderSnapshot): ModelEntry[] {
@@ -36,11 +71,54 @@ export function catalogFromProviders(data: ProviderSnapshot): ModelEntry[] {
         name: model.name,
         providerName: provider.name,
         variants: Object.keys(model.variants ?? {}).filter((key) => key !== "default").sort(),
-        toolcall: model.capabilities.toolcall,
+        toolcall: model.capabilities?.toolcall === true,
+        ...(model.status ? { status: model.status } : {}),
+        ...(model.family ? { family: model.family } : {}),
+        capabilities: {
+          reasoning: knownBoolean(model.capabilities?.reasoning),
+          attachment: knownBoolean(model.capabilities?.attachment),
+          input: modalities(model.capabilities?.input),
+          output: modalities(model.capabilities?.output),
+        },
+        cost: {
+          input: nonnegative(model.cost?.input),
+          output: nonnegative(model.cost?.output),
+          cacheRead: nonnegative(model.cost?.cache?.read),
+          cacheWrite: nonnegative(model.cost?.cache?.write),
+          tiered: Boolean(model.cost?.tiers?.length || model.cost?.experimentalOver200K),
+        },
+        limits: {
+          context: positive(model.limit?.context),
+          input: positive(model.limit?.input),
+          output: positive(model.limit?.output),
+        },
       });
     }
   }
   return [...result.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** Autonomous alternatives only. An empty pool does not authorize every connected model. */
+export function modelPlanningCatalog(config: WorkflowConfig, catalog: ModelEntry[]): ModelEntry[] {
+  const allowed = new Set(config.models.allowed);
+  return catalog.filter((entry) => allowed.has(entry.id) && entry.toolcall && entry.status !== "deprecated");
+}
+
+function catalogDetails(entry: ModelEntry): string {
+  const known = (value: boolean | null | undefined) => value === null || value === undefined ? "unknown" : value ? "yes" : "no";
+  const price = (value: number | null | undefined) => nonnegative(value) === null ? "unknown" : `$${value}`;
+  const limit = (value: number | null | undefined) => positive(value) ?? "unknown";
+  return [
+    `variants: ${entry.variants.join(", ") || "none"}`,
+    `tool calls: ${entry.toolcall ? "yes" : "no"}`,
+    `reasoning: ${known(entry.capabilities?.reasoning)}`,
+    `attachments: ${known(entry.capabilities?.attachment)}`,
+    `input modalities: ${entry.capabilities?.input?.join(", ") || (entry.capabilities?.input ? "none" : "unknown")}`,
+    `output modalities: ${entry.capabilities?.output?.join(", ") || (entry.capabilities?.output ? "none" : "unknown")}`,
+    `context/input/output token limits: ${limit(entry.limits?.context)}/${limit(entry.limits?.input)}/${limit(entry.limits?.output)}`,
+    `catalog USD/1M tokens input ${price(entry.cost?.input)}, output ${price(entry.cost?.output)}, cache read ${price(entry.cost?.cacheRead)}, cache write ${price(entry.cost?.cacheWrite)}${entry.cost?.tiered ? " (additional pricing tiers apply)" : ""}`,
+    ...(entry.status ? [`status: ${entry.status}`] : []),
+  ].join("; ");
 }
 
 export class ModelUnavailableError extends Error {
@@ -164,17 +242,22 @@ export function modelDescription(config: WorkflowConfig, catalog: ModelEntry[]):
   const entries = new Map(catalog.map((entry) => [entry.id, entry]));
   const lines = [
     `Default workflow model: ${config.models.default === "session" ? "the invoking session model (and its variant)" : config.models.default}.`,
-    "Omit model to inherit the default. An explicitly selected agentType can supply its configured model; explicit model overrides take priority.",
+    "Omitting model inherits the default; this is a fallback, not a recommendation to assign the session model to every task. An explicitly selected agentType can supply its configured model; explicit model overrides take priority.",
     "Copy exact provider/model IDs. Bare model IDs or unique suffixes are accepted; ambiguous references fail. Short names require configured aliases.",
     config.models.strict ? "Strict pool: explicit model choices and agent configured models must appear in allowed, including alias targets. Default/session inheritance remains permitted."
       : "The allowed pool guides autonomous model choice. Honor an explicit user request for any other connected model.",
+    "For autonomous assignments, compare the connected, tool-capable, non-deprecated models in the allowed pool against each task; select deliberately rather than repeatedly inheriting the session model. Do not invent capability rankings or claim that a name or reasoning flag proves quality.",
+    "Prefer a less costly sufficient model when catalog prices are comparable and task requirements are met; reserve stronger reasoning or larger context for tasks that need it. Catalog prices may be incomplete, configured estimates, or tier-dependent; unknown is not free, and a reported $0 is not proof of free service or available quota.",
     "Allowed models:",
   ];
   if (!config.models.allowed.length) lines.push("- No alternate models selected; use the default/session model.");
   for (const id of config.models.allowed) {
     const entry = entries.get(id);
-    lines.push(entry ? `- ${id} (${entry.name}); variants: ${entry.variants.join(", ") || "none"}${entry.toolcall ? "" : "; does not support tool calls"}`
+    lines.push(entry ? `- ${id} (${entry.name}; connection: ${entry.providerName}); ${catalogDetails(entry)}${!entry.toolcall || entry.status === "deprecated" ? "; WARNING: not usable for autonomous workflow assignments" : ""}`
       : `- ${id} — WARNING: unavailable from connected providers`);
+  }
+  if (config.models.allowed.length && !modelPlanningCatalog(config, catalog).length) {
+    lines.push("WARNING: no configured allowed model is currently usable for autonomous assignments. Refresh connections or correct the pool; do not silently select an unrelated connected model.");
   }
   for (const [alias, target] of Object.entries(config.models.aliases)) {
     const warning = !entries.has(target) ? "; WARNING: unavailable target"

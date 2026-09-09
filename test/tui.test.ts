@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { UltracodeSessionStore } from "../src/core/ultracode";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import type { Provider } from "@opencode-ai/sdk/v2/types";
-import type { TuiCommand, TuiDialogAlertProps, TuiDialogConfirmProps, TuiDialogPromptProps, TuiDialogSelectProps, TuiPluginApi, TuiPluginMeta } from "@opencode-ai/plugin/tui";
+import type { TuiCommand, TuiDialogAlertProps, TuiDialogConfirmProps, TuiDialogPromptProps, TuiDialogSelectProps, TuiPluginApi, TuiPluginMeta, TuiSlotPlugin } from "@opencode-ai/plugin/tui";
 import plugin from "../src/tui.ts";
 import { loadConfig, saveConfig } from "../src/core/config.ts";
 
@@ -23,7 +24,7 @@ type Dialog = { kind: "select"; props: TuiDialogSelectProps<string> }
   | { kind: "prompt"; props: TuiDialogPromptProps };
 type Command = { name: string; slashName?: string; slashAliases?: string[]; run: () => void | Promise<void> };
 
-async function fixture(settings: { url?: string; legacy?: boolean; legacyTransport?: boolean; remote?: boolean; home?: boolean; emptyProviders?: boolean } = {}) {
+async function fixture(settings: { url?: string; legacy?: boolean; legacyTransport?: boolean; remote?: boolean; home?: boolean; emptyProviders?: boolean; sidebar?: boolean; allowRequests?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "workflow-tui-test-"));
   temporaryDirectories.push(root);
   process.env.XDG_DATA_HOME = join(root, "data");
@@ -39,6 +40,7 @@ async function fixture(settings: { url?: string; legacy?: boolean; legacyTranspo
   const toasts: unknown[] = [];
   const drafted: unknown[] = [];
   const requests: Request[] = [];
+  const slots: TuiSlotPlugin[] = [];
   let providers = settings.emptyProviders ? [] : [
     { id: "openai", name: "OpenAI", models: { "gpt-test": { name: "GPT test", capabilities: { toolcall: true }, variants: { high: {}, max: {} } } } },
     { id: "openrouter", name: "OpenRouter", models: { "anthropic/sonnet-test": { name: "Sonnet test", capabilities: { toolcall: true } } } },
@@ -52,6 +54,7 @@ async function fixture(settings: { url?: string; legacy?: boolean; legacyTranspo
     baseUrl,
     fetch: (async (request: Request) => {
       requests.push(request);
+      if (settings.allowRequests) return Response.json({});
       throw new Error("Native workflow dialogs must not make network or model requests.");
     }) as unknown as typeof fetch,
   });
@@ -59,6 +62,7 @@ async function fixture(settings: { url?: string; legacy?: boolean; legacyTranspo
     value: async (request: unknown) => { drafted.push(request); return { data: true }; },
   });
   const api = {
+    slots: settings.sidebar ? { register: (slot: TuiSlotPlugin) => { slots.push(slot); return "workflow-sidebar"; } } : undefined,
     keymap: settings.legacy ? undefined : { registerLayer: (layer: { commands: Command[] }) => { commands = layer.commands; return () => { unregisterCount++; }; } },
     command: { register: (callback: () => TuiCommand[]) => {
       commands = callback().map((command) => ({ name: command.value, slashName: command.slash?.name, slashAliases: command.slash?.aliases, run: () => command.onSelect?.() }));
@@ -108,7 +112,7 @@ async function fixture(settings: { url?: string; legacy?: boolean; legacyTranspo
     await writeFile(join(runs, id, "run.json"), JSON.stringify(run));
     return run;
   }
-  return { root, directory, global, runs, commands, metadata, toasts, drafted, navigations, requests, client,
+  return { root, directory, global, runs, commands, metadata, toasts, drafted, navigations, requests, client, slots,
     command, slash, choose, storeRun, get dialog() { return dialog; },
     get providers() { return providers; }, setProviders: (next: Provider[]) => { providers = next; },
     get unregisterCount() { return unregisterCount; }, dispose: () => disposals.forEach((callback) => callback()),
@@ -118,7 +122,7 @@ async function fixture(settings: { url?: string; legacy?: boolean; legacyTranspo
 test("registers native commands with keymap and unregisters on disposal", async () => {
   const f = await fixture();
   expect(plugin.id).toBe("opencode-workflow-engine-tui");
-  expect(f.commands.map((command) => command.slashName)).toEqual(["workflow-config", "workflows"]);
+  expect(f.commands.map((command) => command.slashName)).toEqual(["workflow-config", "workflows", "ultracode", "workflow-dismiss"]);
   expect(f.commands.find((command) => command.name === "workflow.config")?.slashAliases).toContain("workflow_config");
   f.dispose();
   expect(f.unregisterCount).toBe(1);
@@ -130,6 +134,90 @@ test("supports the installed legacy command API", async () => {
   const f = await fixture({ legacy: true });
   await f.slash("workflow_config");
   expect(f.dialog?.props.title).toBe("Workflow configuration (project)");
+});
+
+test("native Ultracode controls persist session preferences without chat or model calls", async () => {
+  const f = await fixture();
+  await f.slash("ultracode");
+  expect(f.dialog?.props.title).toContain("off (this session)");
+  await f.choose("on");
+  const store = new UltracodeSessionStore(f.directory);
+  expect(await store.get("ses_parent")).toMatchObject({ enabled: true, effort: "xhigh" });
+  expect(f.dialog?.props.title).toContain("on (this session)");
+  await f.choose("high");
+  expect(await store.get("ses_parent")).toMatchObject({ enabled: false, effort: "high" });
+  await f.choose("reset");
+  expect(await store.get("ses_parent")).toBeUndefined();
+  expect(f.requests).toEqual([]);
+  expect(f.drafted).toEqual([]);
+});
+
+test("native prompt bridge stamps human provenance, dismisses once, and unregisters", async () => {
+  const f = await fixture({ allowRequests: true });
+  const submit = (synthetic = false) => (f.client as TuiPluginApi["client"]).session.prompt({ sessionID: "ses_parent", parts: [{ type: "text", text: "ultracode build", synthetic }] });
+  await f.slash("workflow-dismiss");
+  await submit(true);
+  expect((await f.requests.at(-1)!.clone().json()).parts[0].metadata).toBeUndefined();
+  await (f.client as TuiPluginApi["client"]).session.prompt({ sessionID: "ses_parent", parts: [{ type: "text", text: "ultracode from automation", metadata: { workflowOrigin: "automation" } }] });
+  expect((await f.requests.at(-1)!.clone().json()).parts[0].metadata).toEqual({ workflowOrigin: "automation" });
+  await submit();
+  expect((await f.requests.at(-1)!.clone().json()).parts[0].metadata).toEqual({ workflowOrigin: "human", workflowOptOut: true });
+  await submit();
+  expect((await f.requests.at(-1)!.clone().json()).parts[0].metadata).toEqual({ workflowOrigin: "human" });
+  f.dispose();
+  await submit();
+  expect((await f.requests.at(-1)!.clone().json()).parts[0].metadata).toBeUndefined();
+});
+
+test("Ultracode can be enabled at home for the next created session", async () => {
+  const f = await fixture({ home: true, allowRequests: true });
+  await f.slash("ultracode");
+  await f.choose("current");
+  expect(f.dialog?.props.title).toContain("on (next session)");
+  expect(f.requests).toEqual([]);
+  await (f.client as TuiPluginApi["client"]).session.prompt({ sessionID: "ses_new", parts: [{ type: "text", text: "Build this" }] });
+  expect(await new UltracodeSessionStore(f.directory).get("ses_new")).toMatchObject({ enabled: true, effort: null });
+});
+
+test("pending Ultracode session settings also apply when the first submission is a slash command", async () => {
+  const f = await fixture({ home: true, allowRequests: true });
+  await f.slash("ultracode");
+  await f.choose("on");
+  await (f.client as TuiPluginApi["client"]).session.command({ sessionID: "ses_new", command: "workflow", arguments: "Build this" });
+  expect(await new UltracodeSessionStore(f.directory).get("ses_new")).toMatchObject({ enabled: true, effort: "xhigh" });
+});
+
+test("native automatic defaults and keyword settings honor selected configuration scope", async () => {
+  const f = await fixture();
+  await f.slash("workflow-config");
+  await f.choose("ultracode-default");
+  await f.choose("scope");
+  await f.choose("ultracode-keyword");
+  expect((await loadConfig(f.directory, f.global)).ultracode).toEqual({ enabled: true, keyword: false });
+  expect(JSON.parse(await readFile(join(f.global, "workflow.json"), "utf8")).ultracode).toEqual({ keyword: false });
+});
+
+test("registers the supported host sidebar slot without network or model calls", async () => {
+  const f = await fixture({ sidebar: true });
+  expect(f.slots).toHaveLength(1);
+  expect(typeof f.slots[0]?.slots.sidebar_content).toBe("function");
+  expect(f.requests).toEqual([]);
+  f.dispose();
+  expect(f.slots[0]!.slots.sidebar_content!({} as never, { session_id: "ses_parent" })).toBeNull();
+});
+
+test("planned tasks show rationale before dispatch but cannot send agent skip controls", async () => {
+  const f = await fixture();
+  const run = await f.storeRun({ agents: [], plan: { summary: "Inspect first", tasks: [
+    { id: "inspect", label: "Inspect", model: "openai/gpt-test", agentType: "reviewer", reason: "Reviewer suits code inspection", dependsOn: [] },
+  ] } });
+  await f.command("workflow.runs");
+  await f.choose(run.id);
+  expect(f.dialog?.kind === "select" && f.dialog.props.options.some(option => option.title === "Inspect — queued")).toBe(true);
+  await f.choose("inspect");
+  expect(f.dialog?.kind === "select" && f.dialog.props.options.find(option => option.value === "skip")?.disabled).toBe(true);
+  await f.choose("reason");
+  expect(f.dialog?.kind === "alert" && f.dialog.props.message).toContain("Reviewer suits code inspection");
 });
 
 test.each(["workflow-config", "workflow_config"])("/%s opens native settings with the installed SDK client, without drafting or calling a model", async (name) => {

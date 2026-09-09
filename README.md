@@ -6,9 +6,9 @@
   <img src="assets/hero-light.svg" alt="OpenCode Workflow Engine" width="100%" />
 </picture>
 
-### A small script. A real team of agents. A way to pick up where you left off.
+### Describe the work. Get the right team. Watch it happen.
 
-Compose multi-agent work in JavaScript.<br />Run it in real OpenCode child sessions. Keep every successful result.
+Let the model choose a focused team from your configured pool.<br />Run real OpenCode child sessions with live sidebar progress. Keep every successful result.
 
 [![OpenCode](https://img.shields.io/badge/OpenCode-1.18.29%2B-86b9d6?style=flat-square&labelColor=1c2229)](#quick-start) [![Bun](https://img.shields.io/badge/built_with-Bun-e7b786?style=flat-square&labelColor=1c2229)](#development) [![License](https://img.shields.io/badge/license-MIT-b8c4b7?style=flat-square&labelColor=1c2229)](LICENSE)
 
@@ -38,7 +38,7 @@ Compose multi-agent work in JavaScript.<br />Run it in real OpenCode child sessi
 </tr>
 </table>
 
-<p align="center"><sub>Version 0.1.0 · Server plugin and native dialogs available · Live sidebar planned</sub></p>
+<p align="center"><sub>Version 0.1.0 · Automatic team planning · Native model picker · Live workflow sidebar</sub></p>
 
 <br />
 
@@ -83,7 +83,7 @@ return findings.filter(result => result !== null);
 
 ## Quick start
 
-Requires OpenCode 1.18.29 or later, Git, and access to this private repository. For GitHub CLI authentication, run `gh auth login` and `gh auth setup-git` once, or use your existing Git HTTPS credentials.
+Requires OpenCode 1.18.29 or later and Git. If repository access requires authentication, run `gh auth login` and `gh auth setup-git` once, or use your existing Git HTTPS credentials.
 
 **Install for the current project:**
 
@@ -102,7 +102,7 @@ OpenCode's native installer registers both the workflow tools and terminal dialo
 <details>
 <summary><strong>Installation, updates, and native dialogs</strong></summary>
 
-The repository remains private. Git must be authenticated with an account that can read it; this is not an anonymous npm install.
+For private repository access, Git must be authenticated with an account that can read it. The native command installs directly from Git, not a public npm package.
 
 Add `-f` to the appropriate install command to replace the installed version. Keep `-g` for a global installation. OpenCode manages plugin registration in both its server and TUI configuration; project configuration can override global settings.
 
@@ -158,18 +158,51 @@ Then give the workflow a task:
 /workflow Review the current changes from correctness and test-coverage perspectives, then verify the findings.
 ```
 
-The model reads the authoring reference, writes a workflow, and runs it. Configuration is optional: child agents inherit the invoking session's model by default.
+The model reads the live configuration, chooses the smallest sufficient team, and explains each task/model assignment. It submits a structured plan; the engine creates the orchestration internally, without a script-writing diff in the conversation. Omitted agent counts are a planning decision, not a fixed two-agent template. Explicit user assignments are respected within the configured policy.
+
+Automatic choices use your selected model pool. With no pool, they use the effective default/session model. Reported model prices and capabilities inform the choice; missing prices are not treated as free. Configured OpenCode subagent roles are listed separately from model choices. Plans run in the background by default.
+
+OpenCode can discover compatible skills from `.claude` directories. Workflow planning does not require its recurring `loop` or Ralph skills, and unrelated loop-skill calls are rejected during `/workflow` planning. Explicit requests for those skills and relevant task-specific skills remain available; the plugin does not change global skill discovery.
 
 | Command | Action |
 | :--- | :--- |
 | `/workflow-config` or `/workflow_config` | Open native settings and select connected providers/models. |
-| `/workflow <task>` | Author and execute a workflow. |
+| `/workflow <task>` | Choose a team, explain assignments, and run a plan without displaying orchestration source. |
+| `/ultracode` | Enable automatic workflows for this session, choose effort, or return to the configured default. |
+| `/workflow-dismiss` | Dismiss or restore automatic triggering for the next prompt. |
 | `/workflows` | View this session's runs and child sessions; use native stop and skip controls. |
 | `/workflow-stop [runId]` | Request stopping a specific run, or the latest active run in this session. |
 
+### Automatic workflows with Ultracode
+
+Open `/ultracode` and select **Enable Ultracode**. Describe your task normally: the model decides whether a workflow helps, chooses its team, and can run investigation, implementation, and verification as successive workflows. Simple questions still receive direct answers. The sidebar follows each run, and completed results return automatically.
+
+Session mode requests `xhigh` reasoning only where the selected model supports that exact variant. **Enable with current effort** keeps your existing effort; **Use high effort** disables automatic orchestration and requests exact `high` where supported. Models without those variants retain their existing supported behavior. Settings survive reopening the session; choosing a mode from the home screen applies it to the next session.
+
+For one task, leave session mode off and type:
+
+```text
+ultracode implement the feature and verify it with the relevant tests
+```
+
+The keyword is a one-shot opt-in from a human terminal submission. It does not enable persistent mode or change reasoning effort. Quoted examples, code blocks, synthetic notifications, and ordinary unstamped SDK payloads do not activate it. `/workflow-dismiss` suppresses the next prompt's automatic trigger; a request such as “do this without workflows” also opts out. Stopping a run or skipping its work prevents automatic continuation of that run, and a later user request supersedes an older workflow's continuation.
+
+To start new sessions in automatic mode, turn on **Ultracode by default** in `/workflow-config`. **Ultracode keyword trigger** controls the one-shot keyword independently. Both settings honor project/global scope. Disabling session mode affects future orchestration; use `/workflows` or `/workflow-stop` to stop work already running.
+
+<details>
+<summary><strong>Other clients and Claude compatibility</strong></summary>
+
+The server tool `workflow_mode` offers `show`, `set`, and `reset`. For example, `{"action":"set","enabled":true}` enables this session; `{"action":"set","enabled":false,"effort":"high"}` returns to high effort. These controls leave project/global defaults unchanged.
+
+SDK and other UI integrations can explicitly attest a human-submitted text part with `metadata: {"workflowOrigin":"human"}`; `metadata: {"workflowOptOut":true}` dismisses that prompt's automatic trigger. The host application is responsible for distinguishing human submissions from relayed or automated content. Automation sharing the terminal's SDK client must mark its prompts synthetic or set `workflowOrigin` to `automation`. Session mode also works for SDK requests without a keyword. The OpenCode web and IDE clients do not currently add this plugin's human-origin marker automatically.
+
+This implements the automatic orchestration behavior using OpenCode's plugin APIs. It uses `/ultracode` and `/workflow-dismiss`; it does not replace OpenCode's model picker, add Claude's `--effort` CLI flag, or reproduce Claude's inline keyword highlight and shortcut. Model quality and semantic decisions depend on the selected provider/model. See [Claude's Ultracode behavior](https://code.claude.com/docs/en/workflows#let-claude-decide-with-ultracode) for the comparison.
+
+</details>
+
 ### Workflows in action
 
-Open `/workflows`, then select a run to inspect its agents, models, and phases. Select an agent to open its child session. **Refresh workflows** reloads the status; the dialog is a snapshot, not a live sidebar.
+The **Workflows** sidebar updates automatically with running phases, agent status, assigned models, and selection reasons. Open `/workflows`, then select a run to inspect its agents, models, and phases. Select an agent to open its child session. **Refresh workflows** reloads the detailed dialog; the sidebar updates independently.
 
 <p align="center">
   <a href="assets/workflow-running.png"><img src="assets/workflow-running.png" alt="The actual Documentation review workflow just after starting, with two review agents queued on Z.AI Coding Plan's GLM-5.3." width="832" /></a>
@@ -181,7 +214,7 @@ Open `/workflows`, then select a run to inspect its agents, models, and phases. 
 </p>
 <p align="center"><sub>Completed · Two independent reviews, followed by a summary. All three child results are retained.</sub></p>
 
-Both captures follow the same real GLM-5.3 workflow.
+Both captures follow the same real GLM-5.3 workflow. These earlier captures show the detail dialog, not the new live sidebar.
 
 <details>
 <summary><strong>Run your own script</strong></summary>
@@ -197,7 +230,7 @@ Save the earlier example as `review.js`, then ask the model to call the `workflo
 }
 ```
 
-Supply exactly one source: inline `script`, `scriptPath`, or a saved workflow `name`. Scripts run in an async body with top-level `await` and `return`. Optional `export const meta` accepts literal metadata.
+For advanced scripting, supply exactly one source: inline `script`, `scriptPath`, or a saved workflow `name`, without `plan`. Normal `/workflow` tasks use a declarative plan instead. Scripts run in an async body with top-level `await` and `return`. Optional `export const meta` accepts literal metadata.
 
 Always await dispatched work and handle `null` results. Any unfinished child calls are cancelled when the script returns.
 
@@ -307,7 +340,7 @@ Read `workflow_reference` in OpenCode for schemas, variants, timers, nesting, fa
 <details>
 <summary><strong>Tools, controls, and execution behavior</strong></summary>
 
-The tools are `workflow`, `workflow_reference`, `workflow_runs`, `workflow_saved`, and `workflow_config`. `workflow_runs` provides list/status/stop/skip actions. Deleting a saved script with `workflow_saved` archives it for recovery.
+The tools are `workflow`, `workflow_reference`, `workflow_runs`, `workflow_saved`, `workflow_config`, and `workflow_mode`. `workflow_runs` provides list/status/stop/skip actions. Deleting a saved script with `workflow_saved` archives it for recovery.
 
 **Foreground** waits for completion and follows the invoking tool's cancellation signal. **Background** owns its own signal, survives the end of that step, and reports when the parent is observed idle.
 
@@ -326,15 +359,15 @@ The tools are `workflow`, `workflow_reference`, `workflow_runs`, `workflow_saved
 
 <table>
 <tr>
-<td width="33%" align="center"><h2>207</h2><p>unit tests passed</p></td>
-<td width="33%" align="center"><h2>8</h2><p>real-server integration tests passed</p></td>
+<td width="33%" align="center"><h2>314</h2><p>unit tests passed</p></td>
+<td width="33%" align="center"><h2>13</h2><p>real-server integration tests passed</p></td>
 <td width="33%" align="center"><h2>1.18.30</h2><p>OpenCode version verified</p></td>
 </tr>
 </table>
 
 The integration harness starts a real OpenCode server with isolated configuration and a local deterministic model fixture. It checks actual child sessions, native structured output, resume, background survival, stop/skip, parent cancellation, and a retained git worktree.
 
-**7 real-terminal checks** exercise both configuration command spellings, connected-provider and model pages, persisted pool/default selections, and global scope. They also verify that opening settings creates no chat sessions or model API requests.
+**15 real-terminal checks** exercise both configuration command spellings, connected-provider/model pages, persisted selections, global scope, and native Ultracode controls, then run plans through `/workflow`, a human keyword, and an ordinary session-mode prompt. They verify hidden setup instructions, live sidebar progress, automatic continuation through verification, and per-prompt dismissal. Opening settings still creates no chat sessions or model API requests.
 
 **10 native-install checks** cover project/global registration, repeat installs, Git package installation without a build, generated authoring-guide discovery, and real child sessions from both inline and saved workflows. The exact private-GitHub project and global commands above were also verified with authenticated downloads and real-server execution.
 
@@ -345,11 +378,15 @@ Recorded on September 9, 2026 with Bun 1.4.2 and OpenCode 1.18.30. These are rec
 
 Unit coverage includes model/config policy, schemas, replay, cancellation, timed-out transports, late replies, missing-worker initialization, plugin registration, native dialog APIs, and installer preservation/failure handling.
 
+Plan coverage additionally checks full-team preflight, model selection and rationale, dependency failures, exact model/variant preservation, and source-free replay. The real-server suite verifies hidden command instructions and rejection of unrelated loop-skill reads without changing ordinary sessions.
+
+Ultracode coverage checks human provenance, quoted/reference text, session persistence, per-prompt opt-out, exact reasoning variants, child recursion prevention, inherited permissions, and continuation only for the original request. Real-server fixtures exercise successive implementation/verification workflows and direct answers to simple questions. These are deterministic transport and lifecycle checks, not proof of every model's planning quality.
+
 The installer is also checked in an isolated environment with a real dependency install and build, including a repeat install that preserves configuration without duplicate entries.
 
 The README captures additionally exercise the real connected-provider/model pages, workflow status and child-session navigation, and a completed three-child workflow on Z.AI Coding Plan's GLM-5.3. This is a small read-only review, not broad provider compatibility or quota testing.
 
-Interactive stop/skip controls and the web UI have not been tested. The live sidebar is not implemented.
+Interactive mouse stop/skip actions and the web UI have not been tested end-to-end. Live sidebar rendering and automatic task progress are exercised inside the real terminal UI with isolated model fixtures.
 
 </details>
 
@@ -378,6 +415,12 @@ bun run test:tui
 ```
 
 The TUI checks use isolated configuration and fixture connections; they do not use your provider credentials or make paid model calls.
+
+For the standalone reactive sidebar renderer:
+
+```sh
+bun run test:sidebar
+```
 
 For native installation and source-only Git package verification, install Git and OpenCode, then:
 

@@ -4,7 +4,7 @@ const escape = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<",
 export function report(run: RunState): string {
   const counts = (status: string) => run.agents.filter((agent) => agent.status === status).length;
   const result = JSON.stringify(run.result ?? null, null, 2);
-  const resume = `workflow(${JSON.stringify({ scriptPath: run.scriptPath, resumeFromRunId: run.id })})`;
+  const resume = `workflow(${JSON.stringify({ ...(run.plan ? {} : { scriptPath: run.scriptPath }), resumeFromRunId: run.id })})`;
   const failureRows = run.agents.filter((agent) => agent.error).map((agent) => `${agent.id} ${agent.label}: ${agent.error}`);
   if (run.error) failureRows.unshift(run.error);
   return [
