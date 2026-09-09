@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, open, readFile, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig, resetConfig, saveConfig, type ConfigScope } from "./core/config.ts";
-import { catalogFromProviders } from "./core/models.ts";
+import { catalogFromProviders, type ModelEntry } from "./core/models.ts";
 import { runsDirectory } from "./core/paths.ts";
 
 const runIDPattern = /^wf_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -56,8 +56,10 @@ function runView(value: unknown, sessionID: string): RunView | undefined {
 /** A loopback URL cannot distinguish a local server from an SSH tunnel. */
 function localConnection(api: TuiPluginApi): boolean {
   try {
-    const transport = api.client as unknown as { _client?: { getConfig?: () => { baseUrl?: string } } };
-    const baseUrl = transport._client?.getConfig?.().baseUrl;
+    type Transport = { getConfig?: () => { baseUrl?: string } };
+    // The generated v2 SDK exposes `client`; `_client` was only in our old mock.
+    const transport = api.client as unknown as { client?: Transport; _client?: Transport };
+    const baseUrl = (transport.client ?? transport._client)?.getConfig?.().baseUrl;
     if (!baseUrl) return false;
     const url = new URL(baseUrl);
     return ["http:", "https:"].includes(url.protocol)
@@ -120,9 +122,11 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
   function select(title: string, entries: TuiDialogSelectOption<string>[], action: (value: string) => void | Promise<void>) {
     if (disposed) return;
     api.ui.dialog.replace(() => api.ui.DialogSelect<string>({
-      title, options: entries,
+      title, options: entries, placeholder: "Search…",
       onSelect: (entry) => { if (!entry.disabled) return perform(() => action(entry.value)); },
     }));
+    // replace() resets the host size, so widen only after opening the page.
+    api.ui.dialog.setSize?.("large");
   }
   function remoteRequest(title: string, request: string) {
     api.ui.dialog.replace(() => api.ui.DialogAlert({
@@ -138,7 +142,7 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
     if (!local) { remoteRequest("Workflow configuration on a remote server", "Use workflow_config with action show, then help me configure the workflow model pool."); return; }
     const config = await loadConfig(directory(), globalDirectory());
     select(`Workflow configuration (${scope})`, [
-      { title: `Allowed models (${config.models.allowed.length})`, value: "models", description: "Choose which connected models workflows may select" },
+      { title: `Connected providers and model pool (${config.models.allowed.length})`, value: "models", description: "Choose a connection, then toggle its models" },
       { title: `Default model: ${config.models.default}`, value: "default" },
       { title: `Strict model pool: ${config.models.strict ? "on" : "off"}`, value: "strict", description: "Inherited default/session model remains permitted" },
       { title: `Size guideline: ${config.sizeGuideline ?? "unrestricted"}`, value: "size" },
@@ -146,8 +150,8 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
       { title: `Reset ${scope} overrides`, value: "reset" },
       { title: "Done", value: "done" },
     ], async (value) => {
-      if (value === "models") return modelPicker();
-      if (value === "default") return defaultPicker();
+      if (value === "models") return providerPicker("pool");
+      if (value === "default") return providerPicker("default");
       if (value === "scope") { scope = scope === "project" ? "global" : "project"; return configuration(); }
       if (value === "strict") {
         const latest = await loadConfig(directory(), globalDirectory());
@@ -177,35 +181,77 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
       api.ui.dialog.clear();
     });
   }
-  async function modelPicker() {
+  function connectedCatalog(): ModelEntry[] {
+    // This live snapshot is the same config.providers() data used by /models,
+    // not the full unauthenticated provider catalog or a hard-coded model list.
+    return catalogFromProviders(api.state.provider.map((provider) => ({
+      ...provider,
+      models: Object.fromEntries(Object.entries(provider.models ?? {})
+        .filter(([, model]) => model.status !== "deprecated")
+        .map(([id, model]) => [id, { ...model, capabilities: {
+          ...model.capabilities, toolcall: model.capabilities?.toolcall === true,
+        } }])),
+    })));
+  }
+  type PickerMode = "pool" | "default";
+  async function providerPicker(mode: PickerMode) {
     const config = await loadConfig(directory(), globalDirectory());
-    const catalog = catalogFromProviders([...api.state.provider]);
-    const entries: TuiDialogSelectOption<string>[] = catalog.map((entry) => ({
-      title: `${config.models.allowed.includes(entry.id) ? "[x]" : "[ ]"} ${entry.name}`,
-      value: entry.id, description: entry.id, category: entry.providerName,
-      disabled: !entry.toolcall && !config.models.allowed.includes(entry.id),
-      footer: entry.toolcall ? entry.variants.join(", ") : "No tool calls; excluded from autonomous selection",
-    }));
-    for (const id of config.models.allowed.filter((id) => !catalog.some((entry) => entry.id === id))) {
-      entries.push({ title: `[x] ${id}`, value: id, category: "Unavailable models", description: "Select to remove the stale model" });
+    const catalog = connectedCatalog();
+    const stale = config.models.allowed.filter(id => !catalog.some(entry => entry.id === id));
+    if (!catalog.length && !(mode === "pool" && stale.length)) {
+      alert("No connected workflow models", "Use OpenCode's /connect to connect a provider, then /models to check its available models. Reopen /workflow-config to refresh the list.");
+      return;
     }
+    const providers = new Map<string, ModelEntry[]>();
+    for (const entry of catalog) providers.set(entry.providerID, [...(providers.get(entry.providerID) ?? []), entry]);
+    const entries: TuiDialogSelectOption<string>[] = [...providers].map(([id, models]) => ({
+      title: models[0]!.providerName, value: `provider:${id}`, category: "Connected providers",
+      description: `${models.length} models · ${models.filter(model => config.models.allowed.includes(model.id)).length} selected`,
+      footer: id,
+    }));
+    if (catalog.length) entries.push({ title: "All connected models", value: "__all", category: "Browse" });
+    if (mode === "pool" && stale.length) entries.push({ title: "Unavailable selected models", value: "__unavailable", category: "Manage", description: `${stale.length} selected models can be removed` });
+    if (mode === "default") entries.push({ title: "Same model as the invoking session", value: "session", category: "Inheritance" });
     entries.push({ title: "Back", value: "__back", category: "Settings" });
-    select("Workflow model pool (select to toggle)", entries, async (id) => {
-      if (id === "__back") return configuration();
-      const latest = await loadConfig(directory(), globalDirectory());
-      const allowed = latest.models.allowed.includes(id) ? latest.models.allowed.filter((value) => value !== id) : [...latest.models.allowed, id];
-      await saveConfig(directory(), { models: { allowed } }, scope, globalDirectory());
-      await modelPicker();
+    select(`Connected providers — ${mode === "pool" ? "model pool" : "default model"}`, entries, async (value) => {
+      if (value === "__back") return configuration();
+      if (value === "session" && mode === "default") {
+        await saveConfig(directory(), { models: { default: "session" } }, scope, globalDirectory());
+        return configuration();
+      }
+      const providerID = value.startsWith("provider:") ? value.slice("provider:".length) : undefined;
+      await modelPicker(mode, providerID, value === "__unavailable");
     });
   }
-  async function defaultPicker() {
-    const catalog = catalogFromProviders([...api.state.provider]);
-    select("Default workflow model", [
-      { title: "Same model as the invoking session", value: "session", category: "Inheritance" },
-      ...catalog.map((entry) => ({ title: entry.name, value: entry.id, description: entry.id, category: entry.providerName })),
-    ], async (id) => {
-      await saveConfig(directory(), { models: { default: id } }, scope, globalDirectory());
-      await configuration();
+  async function modelPicker(mode: PickerMode, providerID?: string, unavailable = false) {
+    const config = await loadConfig(directory(), globalDirectory());
+    const catalog = connectedCatalog();
+    const models = unavailable ? [] : catalog.filter(entry => providerID === undefined || entry.providerID === providerID);
+    const entries: TuiDialogSelectOption<string>[] = models.map((entry) => ({
+      title: `${mode === "pool" ? config.models.allowed.includes(entry.id) ? "[x] " : "[ ] " : config.models.default === entry.id ? "[x] " : ""}${entry.name}`,
+      value: entry.id, description: entry.id, category: entry.providerName,
+      disabled: !entry.toolcall && !(mode === "pool" && config.models.allowed.includes(entry.id)),
+      footer: entry.toolcall ? entry.variants.join(", ") : "No tool calls; unavailable for workflow selection",
+    }));
+    if (mode === "pool" && (unavailable || providerID === undefined)) {
+      for (const id of config.models.allowed.filter(id => !catalog.some(entry => entry.id === id))) {
+        entries.push({ title: `[x] ${id}`, value: id, category: "Unavailable models", description: "Select to remove the stale model" });
+      }
+    }
+    entries.push({ title: "Back to providers", value: "__back", category: "Settings" });
+    const name = unavailable ? "Unavailable models" : providerID === undefined ? "All connected models" : models[0]?.providerName ?? providerID;
+    select(`${name} — ${mode === "pool" ? "workflow model pool" : "default workflow model"}`, entries, async (id) => {
+      if (id === "__back") return providerPicker(mode);
+      const latest = await loadConfig(directory(), globalDirectory());
+      if (mode === "pool" && latest.models.allowed.includes(id)) {
+        await saveConfig(directory(), { models: { allowed: latest.models.allowed.filter(value => value !== id) } }, scope, globalDirectory());
+      } else {
+        const selected = connectedCatalog().find(entry => entry.id === id);
+        if (!selected?.toolcall) throw new Error("This model is no longer available for workflows. Reopen /workflow-config to refresh OpenCode's connections.");
+        await saveConfig(directory(), { models: mode === "pool" ? { allowed: [...latest.models.allowed, id] } : { default: id } }, scope, globalDirectory());
+      }
+      if (mode === "default") return configuration();
+      await modelPicker(mode, providerID, unavailable);
     });
   }
 
@@ -273,13 +319,13 @@ export const WorkflowTuiPlugin: TuiPlugin = async (api, options) => {
   }
 
   const commands: TuiCommand[] = [
-    { title: "Configure workflow models", value: "workflow.config", category: "Workflow", slash: { name: "workflow-config" }, onSelect: () => perform(configuration) },
+    { title: "Configure workflow models", value: "workflow.config", category: "Workflow", slash: { name: "workflow-config", aliases: ["workflow_config"] }, onSelect: () => perform(configuration) },
     { title: "View session workflows", value: "workflow.runs", category: "Workflow", slash: { name: "workflows" }, onSelect: () => perform(workflows) },
   ];
   // This shape mirrors OpenCode 1.18's own command compatibility bridge.
   const unregister = typeof api.keymap?.registerLayer === "function" ? api.keymap.registerLayer({
     commands: commands.map((command) => ({ namespace: "palette", name: command.value, title: command.title,
-      category: command.category, slashName: command.slash?.name, run: () => command.onSelect?.(),
+      category: command.category, slashName: command.slash?.name, slashAliases: command.slash?.aliases, run: () => command.onSelect?.(),
     })),
   }) : api.command?.register(() => commands);
   if (!unregister) api.ui.toast({ variant: "warning", message: "Native workflow commands are unavailable; use the server workflow tools." });

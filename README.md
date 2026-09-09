@@ -102,7 +102,7 @@ Run the same command again to update from `main`. Each build uses a fresh manage
 
 The installer respects the standard XDG data and configuration locations and registers the default global configuration. Project settings or explicit OpenCode configuration overrides can still take precedence.
 
-`/workflow-config` opens the model picker. `/workflows` opens run details and child sessions, with stop and skip controls.
+`/workflow-config` (also `/workflow_config`) opens native settings in OpenCode's terminal UI. `/workflows` opens run details and child sessions, with stop and skip controls.
 
 For an SSH tunnel, set `remote: true` in the installed TUI plugin entry's options in `tui.json` or `tui.jsonc`; retain the generated entry. Remote dialogs prepare requests for the server tools. Local dialogs manage local configuration and run files.
 
@@ -112,13 +112,21 @@ For an SSH tunnel, set `remote: true` in the installed TUI plugin entry's option
 
 ## Usage
 
-Restart OpenCode after installation. To choose your workflow models, open:
+Restart OpenCode after installation or an update. In the terminal UI, open the workflow settings page:
 
 ```text
 /workflow-config
 ```
 
-Choose the allowed model pool, default model, strict mode, advisory workflow size, and project or global save scope. The installer includes the native dialogs; without the TUI plugin, the command uses the server's configuration tools instead.
+`/workflow_config` is an alias for the same page. It opens directly—no chat prompt or model call.
+
+1. Select **Connected providers and model pool**.
+2. Choose an OpenCode connection, or **All connected models**.
+3. Select models to toggle them in the pool. `[x]` marks selected models; changes save immediately to the chosen project or global scope.
+
+**Default model** uses the same connection and model lists. The page also controls strict mode, advisory workflow size, and save scope. Its catalog comes from the same live provider data as OpenCode's `/models`, with deprecated models excluded. If the list is empty, use `/connect`, check `/models`, and reopen the workflow settings.
+
+The installer includes the native TUI plugin. For an explicitly chat-based fallback without it, use `/workflow-config-chat` or `/workflows-chat`; those commands intentionally ask the model to use server tools.
 
 Then give the workflow a task:
 
@@ -130,7 +138,7 @@ The model reads the authoring reference, writes a workflow, and runs it. Configu
 
 | Command | Action |
 | :--- | :--- |
-| `/workflow-config` | Configure workflow models and preferences. |
+| `/workflow-config` or `/workflow_config` | Open native settings and select connected providers/models. |
 | `/workflow <task>` | Author and execute a workflow. |
 | `/workflows` | View this session's runs and child sessions; use native stop and skip controls. |
 | `/workflow-stop [runId]` | Request stopping a specific run, or the latest active run in this session. |
@@ -278,24 +286,26 @@ The tools are `workflow`, `workflow_reference`, `workflow_runs`, `workflow_saved
 
 <table>
 <tr>
-<td width="33%" align="center"><h2>190</h2><p>unit tests passed</p></td>
+<td width="33%" align="center"><h2>199</h2><p>unit tests passed</p></td>
 <td width="33%" align="center"><h2>8</h2><p>real-server integration tests passed</p></td>
-<td width="33%" align="center"><h2>1.18.29</h2><p>OpenCode version verified</p></td>
+<td width="33%" align="center"><h2>1.18.30</h2><p>OpenCode version verified</p></td>
 </tr>
 </table>
 
 The integration harness starts a real OpenCode server with isolated configuration and a local deterministic model fixture. It checks actual child sessions, native structured output, resume, background survival, stop/skip, parent cancellation, and a retained git worktree.
 
+**7 real-terminal checks** exercise both configuration command spellings, connected-provider and model pages, persisted pool/default selections, and global scope. They also verify that opening settings creates no chat sessions or model API requests.
+
 <details>
 <summary><strong>Verification scope</strong></summary>
 
-Recorded on September 8, 2026 with Bun 1.4.2 and OpenCode 1.18.29. These are recorded test results, not live CI indicators.
+Recorded on September 9, 2026 with Bun 1.4.2 and OpenCode 1.18.30. These are recorded test results, not live CI indicators.
 
 Unit coverage includes model/config policy, schemas, replay, cancellation, timed-out transports, late replies, missing-worker initialization, plugin registration, native dialog APIs, and installer preservation/failure handling.
 
 The installer is also checked in an isolated environment with a real dependency install and build, including a repeat install that preserves configuration without duplicate entries.
 
-Paid-provider behavior, plan quotas, rendered terminal interactions, and the web UI have not been tested. The live sidebar is not implemented.
+Paid-provider behavior, plan quotas, terminal run-management interactions, and the web UI have not been tested. The live sidebar is not implemented.
 
 </details>
 
@@ -316,6 +326,14 @@ For the isolated OpenCode suite and package contents:
 bun run test:integration
 npm pack --dry-run
 ```
+
+For real keyboard-and-screen verification of the settings pages, install `tmux` and OpenCode, then:
+
+```sh
+bun run test:tui
+```
+
+The TUI checks use isolated configuration and fixture connections; they do not use your provider credentials or make paid model calls.
 
 <details>
 <summary><strong>Find your way around the source</strong></summary>

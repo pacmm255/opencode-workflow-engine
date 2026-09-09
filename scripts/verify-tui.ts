@@ -1,0 +1,205 @@
+import assert from "node:assert/strict";
+import { Database } from "bun:sqlite";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+/**
+ * Real keyboard-and-screen regression checks, not a mock of the plugin API.
+ * Requires tmux and OpenCode on PATH. Every OpenCode location and provider is an
+ * isolated fixture; no user configuration or provider credentials are inherited.
+ */
+const tmux = Bun.which("tmux");
+const opencode = Bun.which("opencode");
+if (!tmux || !opencode) throw new Error("Real TUI verification requires tmux and OpenCode on PATH.");
+
+const root = await mkdtemp(join(tmpdir(), "workflow-tui-check-"));
+const project = join(root, "project");
+const config = join(root, "config", "opencode");
+const socket = join(root, "tmux.sock");
+const projectConfig = join(project, ".opencode", "workflow.json");
+const globalConfig = join(config, "workflow.json");
+const log = join(root, "data", "opencode", "log", "opencode.log");
+const subprocessEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C.UTF-8", TERM: "xterm-256color" };
+const requests: string[] = [];
+let screen = "";
+let success = false;
+let checks = 0;
+let fixture: ReturnType<typeof Bun.serve> | undefined;
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+async function command(args: string[], tolerateFailure = false): Promise<string> {
+  const child = Bun.spawn([tmux!, "-f", "/dev/null", "-S", socket, ...args], {
+    env: subprocessEnv, stdout: "pipe", stderr: "pipe",
+  });
+  const [code, stdout, stderr] = await Promise.all([
+    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+  ]);
+  if (code && !tolerateFailure) throw new Error(`tmux ${args[0]} failed: ${stderr || stdout}`);
+  return stdout;
+}
+
+async function capture(): Promise<string> {
+  screen = await command(["capture-pane", "-p", "-t", "verify"]);
+  return screen;
+}
+
+async function waitFor(description: string, predicate: (value: string) => boolean | Promise<boolean>, timeout = 15_000): Promise<string> {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const current = await capture();
+    if (await predicate(current)) return current;
+    await Bun.sleep(120);
+  }
+  throw new Error(`Timed out waiting for ${description}.\n${screen}`);
+}
+
+async function keys(...values: string[]): Promise<void> {
+  await command(["send-keys", "-t", "verify", ...values]);
+}
+
+async function type(value: string): Promise<void> {
+  await command(["send-keys", "-t", "verify", "-l", value]);
+}
+
+async function choose(label: string): Promise<void> {
+  await keys("C-u");
+  await type(label);
+  await waitFor(`filtered option ${label}`, value => value.includes(label));
+  await keys("Enter");
+}
+
+async function settings(alias: "workflow_config" | "workflow-config"): Promise<void> {
+  await type(`/${alias}`);
+  await waitFor(`${alias} completion`, value => value.includes(`/${alias}`) && value.includes("Configure workflow"));
+  await keys("Enter");
+  await waitFor(`${alias} native settings`, value => value.includes("Workflow configuration (") && value.includes("Connected providers and model pool"));
+  assert(!screen.includes("User request:"), `${alias} must not submit the chat fallback`);
+  await writeFile(join(root, `${alias}.txt`), screen);
+}
+
+async function patch(file: string): Promise<{ models?: { allowed?: string[]; default?: string; strict?: boolean } }> {
+  return JSON.parse(await readFile(file, "utf8"));
+}
+
+function passed(message: string): void {
+  checks++;
+  console.log(`✓ ${message}`);
+}
+
+try {
+  const dist = resolve(import.meta.dir, "../dist");
+  await Promise.all([readFile(join(dist, "server.js")), readFile(join(dist, "tui.js"))]);
+  await Promise.all([project, config, join(root, "data"), join(root, "cache"), join(root, "state")].map(directory => mkdir(directory, { recursive: true })));
+  fixture = Bun.serve({
+    hostname: "127.0.0.1", port: 0,
+    fetch(request) {
+      requests.push(new URL(request.url).pathname);
+      return Response.json({ error: { message: "This UI-only check must not invoke a model." } }, { status: 400 });
+    },
+  });
+  const baseModel = { limit: { context: 32_000, output: 4096 }, cost: { input: 0, output: 0 }, tool_call: true };
+  const provider = (name: string, models: Record<string, unknown>) => ({
+    npm: "@ai-sdk/openai-compatible", name,
+    options: { baseURL: `${fixture!.url.origin}/v1`, apiKey: "isolated-fixture-only" }, models,
+  });
+  await writeFile(join(config, "opencode.json"), JSON.stringify({
+    plugin: [pathToFileURL(join(dist, "server.js")).href],
+    enabled_providers: ["fixture", "second-fixture"],
+    model: "fixture/family/reviewer", small_model: "fixture/family/reviewer", share: "disabled", autoupdate: false,
+    provider: {
+      fixture: provider("Local Fixture Connection", {
+        "family/reviewer": { ...baseModel, name: "Fixture Reviewer" },
+        planner: { ...baseModel, name: "Fixture Planner" },
+        "text-only": { ...baseModel, name: "Fixture Text Only", tool_call: false },
+        retired: { ...baseModel, name: "Retired Fixture Model", status: "deprecated" },
+      }),
+      "second-fixture": provider("Second Fixture Connection", { coder: { ...baseModel, name: "Fixture Coder" } }),
+      disabled: provider("Disabled Fixture Connection", { hidden: { ...baseModel, name: "Hidden Fixture Model" } }),
+    },
+  }));
+  await writeFile(join(config, "tui.json"), JSON.stringify({ plugin: [pathToFileURL(join(dist, "tui.js")).href] }));
+  const environment = {
+    ...subprocessEnv, COLORTERM: "truecolor",
+    XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
+    XDG_CACHE_HOME: join(root, "cache"), XDG_STATE_HOME: join(root, "state"),
+    OPENCODE_CONFIG_DIR: config,
+    OPENCODE_DISABLE_AUTOUPDATE: "1", OPENCODE_DISABLE_MODELS_FETCH: "1", OPENCODE_DISABLE_FFF: "1",
+    OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: "1",
+  };
+  const launch = ["env", "-i", ...Object.entries(environment).map(([key, value]) => `${key}=${value}`), opencode!].map(shellQuote).join(" ");
+  await command(["new-session", "-d", "-s", "verify", "-x", "140", "-y", "48", "-c", project, `exec ${launch}`]);
+  await waitFor("OpenCode startup", value => value.includes("Fixture Reviewer") && value.includes("commands"), 90_000);
+
+  await settings("workflow_config");
+  await keys("Escape");
+  await waitFor("settings to close", value => !value.includes("Workflow configuration ("));
+  await settings("workflow-config");
+  passed("Both slash spellings open native settings without submitting a prompt");
+
+  await choose("Connected providers and model pool");
+  await waitFor("connected provider list", value => value.includes("Connected providers") && value.includes("Local Fixture Connection") && value.includes("Second Fixture Connection"));
+  assert(!screen.includes("Disabled Fixture Connection"));
+  await writeFile(join(root, "connections.txt"), screen);
+  await choose("Local Fixture Connection");
+  await waitFor("provider model list", value => value.includes("workflow model pool") && value.includes("Fixture Reviewer") && value.includes("Fixture Planner"));
+  assert(!screen.includes("Fixture Coder"), "A provider-specific list must not contain another provider's models");
+  assert(!screen.includes("Retired Fixture Model"), "Deprecated models must not appear");
+  assert(!screen.includes("Hidden Fixture Model"), "Disabled-provider models must not appear");
+  await writeFile(join(root, "models.txt"), screen);
+  passed("Connected-provider catalog is grouped and excludes unavailable models");
+
+  await choose("Fixture Reviewer");
+  await waitFor("selected model to persist", async () => (await patch(projectConfig).catch(() => undefined))?.models?.allowed?.includes("fixture/family/reviewer") === true);
+  assert.deepEqual((await patch(projectConfig)).models?.allowed, ["fixture/family/reviewer"]);
+  passed("Model toggle persists the exact slash-bearing provider/model ID");
+
+  // Unsupported models may be displayed as disabled rows, but cannot be added.
+  await choose("Fixture Text Only");
+  await waitFor("non-tool model remains unselected", value => value.includes("Fixture Text Only"));
+  assert.deepEqual((await patch(projectConfig)).models?.allowed, ["fixture/family/reviewer"]);
+  await keys("Escape");
+  await waitFor("model dialog to close", value => !value.includes("workflow model pool"));
+  passed("Text-only models cannot be added to the autonomous pool");
+
+  await settings("workflow_config");
+  await choose("Default model");
+  await waitFor("default model provider list", value => value.includes("Connected providers") && value.includes("default model"));
+  await choose("Second Fixture Connection");
+  await waitFor("second provider defaults", value => value.includes("default workflow model") && value.includes("Fixture Coder"));
+  await choose("Fixture Coder");
+  await waitFor("project default persisted", async value => value.includes("Workflow configuration (") && (await patch(projectConfig)).models?.default === "second-fixture/coder");
+  passed("Default model selection uses the same connected-provider catalog");
+
+  await choose("Save scope");
+  await waitFor("global scope", value => value.includes("Workflow configuration (global)"));
+  await choose("Strict model pool");
+  await waitFor("global settings persisted", async value => value.includes("Strict model pool: on") && (await patch(globalConfig).catch(() => undefined))?.models?.strict === true);
+  assert.equal((await patch(projectConfig)).models?.strict, undefined);
+  passed("Global scope saves to the isolated global config without overwriting project settings");
+
+  await keys("Escape");
+  assert.deepEqual((await patch(projectConfig)).models?.allowed, ["fixture/family/reviewer"], "Later settings must preserve the selected pool and must not add text-only models");
+  assert.deepEqual(requests, [], "Native settings must never make model API requests");
+  const database = new Database(join(root, "data", "opencode", "opencode.db"), { readonly: true });
+  try {
+    const row = database.query("SELECT COUNT(*) AS count FROM session").get() as { count: number };
+    assert.equal(row.count, 0, "Native settings must never create chat sessions");
+  } finally { database.close(); }
+  passed("No chat sessions or model API requests were created");
+  success = true;
+  console.log(`\n${checks} real OpenCode TUI checks passed.`);
+} catch (error) {
+  await writeFile(join(root, "failure-screen.txt"), screen).catch(() => {});
+  console.error(`Real TUI artifacts retained at ${root}`);
+  console.error((await readFile(log, "utf8").catch(() => "")).slice(-6000));
+  throw error;
+} finally {
+  await command(["kill-server"], true).catch(() => {});
+  await fixture?.stop(true);
+  if (success) await rm(root, { recursive: true, force: true });
+}

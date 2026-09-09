@@ -76,7 +76,12 @@ test("config hook registers commands, subagent, and absolute skill path without 
   const config = { command: { workflow: existing } } as Parameters<NonNullable<typeof f.hooks.config>>[0];
   await f.hooks.config?.(config);
   expect(config.command?.workflow).toEqual(existing);
-  expect(Object.keys(config.command ?? {}).sort()).toEqual(["workflow", "workflow-config", "workflow-stop", "workflows"]);
+  expect(Object.keys(config.command ?? {}).sort()).toEqual(["workflow", "workflow-config-chat", "workflow-stop", "workflows-chat"]);
+  for (const nativeName of ["workflow-config", "workflow_config", "workflows"]) {
+    expect(config.command).not.toHaveProperty(nativeName);
+  }
+  expect(config.command?.["workflow-config-chat"]?.description).toContain("Chat fallback");
+  expect(config.command?.["workflows-chat"]?.description).toContain("Chat fallback");
   expect(config.agent?.["workflow-agent"]?.mode).toBe("subagent");
   const skills = (config as unknown as { skills: { paths: string[] } }).skills.paths;
   expect(skills).toHaveLength(1);

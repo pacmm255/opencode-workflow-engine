@@ -194,7 +194,12 @@ describe("built plugin in a real isolated OpenCode server", () => {
       client.app.agents({ directory: projectDirectory }, { throwOnError: true }),
     ]);
     expect(commands.map(command => command.name)).toContain("workflow");
-    expect(commands.map(command => command.name)).toContain("workflow-config");
+    const commandNames = commands.map(command => command.name);
+    expect(commandNames).toContain("workflow-config-chat");
+    expect(commandNames).toContain("workflows-chat");
+    for (const nativeName of ["workflow-config", "workflow_config", "workflows"]) {
+      expect(commandNames).not.toContain(nativeName);
+    }
     expect(agents.some(agent => agent.name === "workflow-agent")).toBe(true);
     const sessionID = await launch({}, "workflow_reference");
     expect(await toolResult(sessionID, "workflow_reference")).toContain("pipeline");

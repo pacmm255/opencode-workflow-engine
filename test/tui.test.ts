@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import type { Provider } from "@opencode-ai/sdk/v2/types";
 import type { TuiCommand, TuiDialogAlertProps, TuiDialogConfirmProps, TuiDialogPromptProps, TuiDialogSelectProps, TuiPluginApi, TuiPluginMeta } from "@opencode-ai/plugin/tui";
 import plugin from "../src/tui.ts";
@@ -20,9 +21,9 @@ type Dialog = { kind: "select"; props: TuiDialogSelectProps<string> }
   | { kind: "alert"; props: TuiDialogAlertProps }
   | { kind: "confirm"; props: TuiDialogConfirmProps }
   | { kind: "prompt"; props: TuiDialogPromptProps };
-type Command = { name: string; slashName?: string; run: () => void | Promise<void> };
+type Command = { name: string; slashName?: string; slashAliases?: string[]; run: () => void | Promise<void> };
 
-async function fixture(settings: { url?: string; legacy?: boolean; remote?: boolean; home?: boolean } = {}) {
+async function fixture(settings: { url?: string; legacy?: boolean; legacyTransport?: boolean; remote?: boolean; home?: boolean; emptyProviders?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "workflow-tui-test-"));
   temporaryDirectories.push(root);
   process.env.XDG_DATA_HOME = join(root, "data");
@@ -37,15 +38,30 @@ async function fixture(settings: { url?: string; legacy?: boolean; remote?: bool
   const navigations: Array<{ name: string; params?: Record<string, unknown> }> = [];
   const toasts: unknown[] = [];
   const drafted: unknown[] = [];
-  const providers = [
+  const requests: Request[] = [];
+  let providers = settings.emptyProviders ? [] : [
     { id: "openai", name: "OpenAI", models: { "gpt-test": { name: "GPT test", capabilities: { toolcall: true }, variants: { high: {}, max: {} } } } },
     { id: "openrouter", name: "OpenRouter", models: { "anthropic/sonnet-test": { name: "Sonnet test", capabilities: { toolcall: true } } } },
     { id: "plain", name: "Plain provider", models: { "text-only": { name: "Text only", capabilities: { toolcall: false } } } },
   ] as unknown as Provider[];
+  const baseUrl = settings.url ?? "http://opencode.internal";
+  const client = settings.legacyTransport ? {
+    _client: { getConfig: () => ({ baseUrl }) },
+    tui: { appendPrompt: async (request: unknown) => { drafted.push(request); return { data: true }; } },
+  } : createOpencodeClient({
+    baseUrl,
+    fetch: (async (request: Request) => {
+      requests.push(request);
+      throw new Error("Native workflow dialogs must not make network or model requests.");
+    }) as unknown as typeof fetch,
+  });
+  if (!settings.legacyTransport) Object.defineProperty(client.tui, "appendPrompt", {
+    value: async (request: unknown) => { drafted.push(request); return { data: true }; },
+  });
   const api = {
     keymap: settings.legacy ? undefined : { registerLayer: (layer: { commands: Command[] }) => { commands = layer.commands; return () => { unregisterCount++; }; } },
     command: { register: (callback: () => TuiCommand[]) => {
-      commands = callback().map((command) => ({ name: command.value, slashName: command.slash?.name, run: () => command.onSelect?.() }));
+      commands = callback().map((command) => ({ name: command.value, slashName: command.slash?.name, slashAliases: command.slash?.aliases, run: () => command.onSelect?.() }));
       return () => { unregisterCount++; };
     } },
     ui: {
@@ -60,17 +76,19 @@ async function fixture(settings: { url?: string; legacy?: boolean; remote?: bool
       current: settings.home ? { name: "home" } : { name: "session", params: { sessionID: "ses_parent" } },
       navigate: (name: string, params?: Record<string, unknown>) => { navigations.push({ name, params }); },
     },
-    state: { path: { directory, config: global }, provider: providers, session: { get: () => ({ metadata }) } },
-    client: {
-      _client: { getConfig: () => ({ baseUrl: settings.url ?? "http://opencode.internal" }) },
-      tui: { appendPrompt: async (request: unknown) => { drafted.push(request); return { data: true }; } },
-    },
+    state: { path: { directory, config: global }, get provider() { return providers; }, session: { get: () => ({ metadata }) } },
+    client,
     lifecycle: { onDispose: (callback: () => void) => { disposals.push(callback); } },
   } as unknown as TuiPluginApi;
   await plugin.tui(api, settings.remote ? { remote: true } : undefined, {} as TuiPluginMeta);
   async function command(name: string) {
     const item = commands.find((command) => command.name === name);
     if (!item) throw new Error(`Missing command ${name}`);
+    await item.run();
+  }
+  async function slash(name: string) {
+    const item = commands.find((command) => command.slashName === name || command.slashAliases?.includes(name));
+    if (!item) throw new Error(`Missing slash command /${name}`);
     await item.run();
   }
   async function choose(value: string) {
@@ -90,8 +108,9 @@ async function fixture(settings: { url?: string; legacy?: boolean; remote?: bool
     await writeFile(join(runs, id, "run.json"), JSON.stringify(run));
     return run;
   }
-  return { root, directory, global, runs, commands, metadata, toasts, drafted, navigations,
-    command, choose, storeRun, get dialog() { return dialog; },
+  return { root, directory, global, runs, commands, metadata, toasts, drafted, navigations, requests, client,
+    command, slash, choose, storeRun, get dialog() { return dialog; },
+    get providers() { return providers; }, setProviders: (next: Provider[]) => { providers = next; },
     get unregisterCount() { return unregisterCount; }, dispose: () => disposals.forEach((callback) => callback()),
   };
 }
@@ -100,6 +119,7 @@ test("registers native commands with keymap and unregisters on disposal", async 
   const f = await fixture();
   expect(plugin.id).toBe("opencode-workflow-engine-tui");
   expect(f.commands.map((command) => command.slashName)).toEqual(["workflow-config", "workflows"]);
+  expect(f.commands.find((command) => command.name === "workflow.config")?.slashAliases).toContain("workflow_config");
   f.dispose();
   expect(f.unregisterCount).toBe(1);
   await f.command("workflow.config");
@@ -108,14 +128,55 @@ test("registers native commands with keymap and unregisters on disposal", async 
 
 test("supports the installed legacy command API", async () => {
   const f = await fixture({ legacy: true });
-  await f.command("workflow.config");
+  await f.slash("workflow_config");
   expect(f.dialog?.props.title).toBe("Workflow configuration (project)");
 });
 
-test("model picker groups connected models, toggles exact IDs, and excludes models without tools", async () => {
+test.each(["workflow-config", "workflow_config"])("/%s opens native settings with the installed SDK client, without drafting or calling a model", async (name) => {
+  const f = await fixture();
+  expect("client" in f.client).toBe(true);
+  expect("_client" in f.client).toBe(false);
+  await f.slash(name);
+  expect(f.dialog?.kind).toBe("select");
+  expect(f.dialog?.props.title).toBe("Workflow configuration (project)");
+  expect(f.drafted).toEqual([]);
+  expect(f.requests).toEqual([]);
+});
+
+test("legacy transport clients retain local native configuration", async () => {
+  const f = await fixture({ legacyTransport: true });
+  await f.slash("workflow_config");
+  expect(f.dialog?.kind).toBe("select");
+  expect(f.dialog?.props.title).toBe("Workflow configuration (project)");
+});
+
+test("provider page shows OpenCode connections and filters the model picker by exact provider", async () => {
+  const f = await fixture();
+  await f.slash("workflow_config");
+  await f.choose("models");
+  if (f.dialog?.kind !== "select") throw new Error("Expected providers");
+  expect(f.dialog.props.options.filter((entry) => entry.value.startsWith("provider:")).map((entry) => entry.value).sort()).toEqual([
+    "provider:openai", "provider:openrouter", "provider:plain",
+  ]);
+  expect(f.dialog.props.options.find((entry) => entry.value === "provider:openrouter")?.title).toContain("OpenRouter");
+  expect(f.dialog.props.options.some((entry) => entry.value === "__all")).toBe(true);
+  await f.choose("provider:openrouter");
+  if (f.dialog?.kind !== "select") throw new Error("Expected models");
+  expect(f.dialog.props.options.filter((entry) => !entry.value.startsWith("__")).map((entry) => entry.value)).toEqual(["openrouter/anthropic/sonnet-test"]);
+  await f.choose("__back");
+  if (f.dialog?.kind !== "select") throw new Error("Expected providers");
+  expect(f.dialog.props.options.some((entry) => entry.value === "provider:openai")).toBe(true);
+  await f.choose("__back");
+  expect(f.dialog?.props.title).toBe("Workflow configuration (project)");
+  expect(f.drafted).toEqual([]);
+  expect(f.requests).toEqual([]);
+});
+
+test("all-model picker groups connected models, toggles exact IDs, and excludes models without tools", async () => {
   const f = await fixture();
   await f.command("workflow.config");
   await f.choose("models");
+  await f.choose("__all");
   expect(f.dialog?.kind).toBe("select");
   if (f.dialog?.kind !== "select") throw new Error("Expected picker");
   expect(f.dialog.props.options.find((entry) => entry.value === "openrouter/anthropic/sonnet-test")?.category).toBe("OpenRouter");
@@ -128,6 +189,96 @@ test("model picker groups connected models, toggles exact IDs, and excludes mode
   expect((await loadConfig(f.directory, f.global)).models.allowed).toEqual([]);
 });
 
+test("provider model toggles persist and stay in the chosen provider until navigating back", async () => {
+  const f = await fixture();
+  await f.slash("workflow_config");
+  await f.choose("models");
+  await f.choose("provider:openai");
+  await f.choose("openai/gpt-test");
+  if (f.dialog?.kind !== "select") throw new Error("Expected persistent model picker");
+  expect(f.dialog.props.options.find((entry) => entry.value === "openai/gpt-test")?.title).toContain("[x]");
+  expect(f.dialog.props.options.some((entry) => entry.value === "openrouter/anthropic/sonnet-test")).toBe(false);
+  expect((await loadConfig(f.directory, f.global)).models.allowed).toEqual(["openai/gpt-test"]);
+  await f.choose("__back");
+  await f.choose("provider:openrouter");
+  await f.choose("openrouter/anthropic/sonnet-test");
+  expect((await loadConfig(f.directory, f.global)).models.allowed).toEqual(["openai/gpt-test", "openrouter/anthropic/sonnet-test"]);
+  await f.choose("__back");
+  await f.choose("provider:openai");
+  await f.choose("openai/gpt-test");
+  expect((await loadConfig(f.directory, f.global)).models.allowed).toEqual(["openrouter/anthropic/sonnet-test"]);
+});
+
+test("provider and model pages read refreshed OpenCode state instead of a startup snapshot", async () => {
+  const f = await fixture();
+  await f.slash("workflow_config");
+  await f.choose("models");
+  await f.choose("provider:openai");
+  f.setProviders([{ id: "new", name: "New connection", models: {
+    "model/new": { name: "New connected model", capabilities: { toolcall: true } },
+  } }] as unknown as Provider[]);
+  await f.choose("__back");
+  if (f.dialog?.kind !== "select") throw new Error("Expected refreshed providers");
+  expect(f.dialog.props.options.some((entry) => entry.value === "provider:openai")).toBe(false);
+  expect(f.dialog.props.options.some((entry) => entry.value === "provider:new")).toBe(true);
+  await f.choose("provider:new");
+  await f.choose("new/model/new");
+  expect((await loadConfig(f.directory, f.global)).models.allowed).toEqual(["new/model/new"]);
+});
+
+test("deprecated models are hidden and missing tool capabilities fail safely in the pool picker", async () => {
+  const f = await fixture();
+  f.setProviders([{ id: "safe", name: "Safety fixture", models: {
+    current: { name: "Current", status: "active", capabilities: { toolcall: true } },
+    retired: { name: "Retired", status: "deprecated", capabilities: { toolcall: true } },
+    unknown: { name: "Unknown capability" },
+    unspecified: { name: "Missing tool flag", capabilities: {} },
+  } }] as unknown as Provider[]);
+  await f.slash("workflow_config");
+  await f.choose("models");
+  await f.choose("provider:safe");
+  if (f.dialog?.kind !== "select") throw new Error("Expected models");
+  expect(f.dialog.props.options.some((entry) => entry.value === "safe/retired")).toBe(false);
+  expect(f.dialog.props.options.find((entry) => entry.value === "safe/unknown")?.disabled).toBe(true);
+  expect(f.dialog.props.options.find((entry) => entry.value === "safe/unspecified")?.disabled).toBe(true);
+  await f.choose("safe/unknown");
+  await f.choose("safe/unspecified");
+  expect((await loadConfig(f.directory, f.global)).models.allowed).toEqual([]);
+  await f.choose("safe/current");
+  expect((await loadConfig(f.directory, f.global)).models.allowed).toEqual(["safe/current"]);
+});
+
+test("empty OpenCode catalog provides connection guidance without drafting a model request", async () => {
+  const f = await fixture({ emptyProviders: true });
+  await f.slash("workflow_config");
+  await f.choose("models");
+  if (f.dialog?.kind !== "alert") throw new Error("Expected connection guidance");
+  expect(f.dialog.props.message).toContain("/connect");
+  expect(f.dialog.props.message).toContain("/models");
+  expect(f.drafted).toEqual([]);
+  expect(f.requests).toEqual([]);
+  expect((await loadConfig(f.directory, f.global)).models.allowed).toEqual([]);
+});
+
+test("default picker chooses a connected provider then an exact model or session inheritance", async () => {
+  const f = await fixture();
+  await f.slash("workflow_config");
+  await f.choose("default");
+  if (f.dialog?.kind !== "select") throw new Error("Expected default providers");
+  expect(f.dialog.props.options.some((entry) => entry.value === "session")).toBe(true);
+  await f.choose("provider:openrouter");
+  if (f.dialog?.kind !== "select") throw new Error("Expected default models");
+  expect(f.dialog.props.options.some((entry) => entry.value === "openai/gpt-test")).toBe(false);
+  await f.choose("openrouter/anthropic/sonnet-test");
+  expect((await loadConfig(f.directory, f.global)).models.default).toBe("openrouter/anthropic/sonnet-test");
+  expect(f.dialog?.props.title).toBe("Workflow configuration (project)");
+  await f.choose("default");
+  await f.choose("__all");
+  await f.choose("__back");
+  await f.choose("session");
+  expect((await loadConfig(f.directory, f.global)).models.default).toBe("session");
+});
+
 test("native settings update strict mode, default model, global scope, and remove stale models", async () => {
   const f = await fixture();
   await saveConfig(f.directory, { models: { allowed: ["gone/model"] } }, "project", f.global);
@@ -135,11 +286,14 @@ test("native settings update strict mode, default model, global scope, and remov
   await f.choose("strict");
   expect((await loadConfig(f.directory, f.global)).models.strict).toBe(true);
   await f.choose("default");
+  await f.choose("provider:openai");
   await f.choose("openai/gpt-test");
   expect((await loadConfig(f.directory, f.global)).models.default).toBe("openai/gpt-test");
   await f.choose("models");
+  await f.choose("__unavailable");
   await f.choose("gone/model");
   expect((await loadConfig(f.directory, f.global)).models.allowed).toEqual([]);
+  await f.choose("__back");
   await f.choose("__back");
   await f.choose("scope");
   expect(f.dialog?.props.title).toContain("global");

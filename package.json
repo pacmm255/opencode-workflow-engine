@@ -19,6 +19,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test ./test",
     "test:integration": "bun run build && bun test ./e2e --timeout 120000",
+    "test:tui": "bun run build && bun run scripts/verify-tui.ts",
     "prepublishOnly": "bun run typecheck && bun run test && bun run build"
   },
   "dependencies": {
