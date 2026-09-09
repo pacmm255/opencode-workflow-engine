@@ -12,7 +12,7 @@ Compose multi-agent work in JavaScript.<br />Run it in real OpenCode child sessi
 
 [![OpenCode](https://img.shields.io/badge/OpenCode-1.18.29%2B-86b9d6?style=flat-square&labelColor=1c2229)](#quick-start) [![Bun](https://img.shields.io/badge/built_with-Bun-e7b786?style=flat-square&labelColor=1c2229)](#development) [![License](https://img.shields.io/badge/license-MIT-b8c4b7?style=flat-square&labelColor=1c2229)](LICENSE)
 
-**[Get started](#quick-start)** &nbsp; / &nbsp; **[See a workflow](#one-script-many-moving-parts)** &nbsp; / &nbsp; **[Choose models](#your-team-your-models)** &nbsp; / &nbsp; **[Resume work](#keep-the-work-youve-already-done)**
+**[Get started](#quick-start)** &nbsp; / &nbsp; **[Usage](#usage)** &nbsp; / &nbsp; **[See a workflow](#one-script-many-moving-parts)** &nbsp; / &nbsp; **[Choose models](#your-team-your-models)** &nbsp; / &nbsp; **[Resume work](#keep-the-work-youve-already-done)**
 
 </div>
 
@@ -83,7 +83,7 @@ return findings.filter(result => result !== null);
 
 ## Quick start
 
-**01 — Install with one command**
+**Install with one command**
 
 Requires macOS or Linux, Bash, Git, Bun, GitHub CLI, and OpenCode 1.18.29 or later. Sign in with `gh auth login` using an account with access to this private repository.
 
@@ -92,16 +92,6 @@ bash -c 'set -e; workflow_installer=$(gh api --hostname github.com repos/pacmm25
 ```
 
 The command downloads the installer completely before running it. It builds the plugin and enables both the server and native dialogs in your global OpenCode configuration. No manual path editing is needed.
-
-**02 — Give it a task**
-
-Restart OpenCode, then:
-
-```text
-/workflow Review the current changes from correctness and test-coverage perspectives, then verify the findings.
-```
-
-The model reads the authoring reference, writes a workflow, and runs it. Child agents inherit the invoking session's model by default.
 
 <details>
 <summary><strong>Installation, updates, and native dialogs</strong></summary>
@@ -117,6 +107,33 @@ The installer respects the standard XDG data and configuration locations and reg
 For an SSH tunnel, set `remote: true` in the installed TUI plugin entry's options in `tui.json` or `tui.jsonc`; retain the generated entry. Remote dialogs prepare requests for the server tools. Local dialogs manage local configuration and run files.
 
 </details>
+
+<br />
+
+## Usage
+
+Restart OpenCode after installation. To choose your workflow models, open:
+
+```text
+/workflow-config
+```
+
+Choose the allowed model pool, default model, strict mode, advisory workflow size, and project or global save scope. The installer includes the native dialogs; without the TUI plugin, the command uses the server's configuration tools instead.
+
+Then give the workflow a task:
+
+```text
+/workflow Review the current changes from correctness and test-coverage perspectives, then verify the findings.
+```
+
+The model reads the authoring reference, writes a workflow, and runs it. Configuration is optional: child agents inherit the invoking session's model by default.
+
+| Command | Action |
+| :--- | :--- |
+| `/workflow-config` | Configure workflow models and preferences. |
+| `/workflow <task>` | Author and execute a workflow. |
+| `/workflows` | View this session's runs and child sessions; use native stop and skip controls. |
+| `/workflow-stop [runId]` | Request stopping a specific run, or the latest active run in this session. |
 
 <details>
 <summary><strong>Run your own script</strong></summary>
@@ -240,14 +257,7 @@ Read `workflow_reference` in OpenCode for schemas, variants, timers, nesting, fa
 </details>
 
 <details>
-<summary><strong>Commands, controls, and execution behavior</strong></summary>
-
-| Command | Action |
-| :--- | :--- |
-| `/workflow <task>` | Author and execute a workflow. |
-| `/workflow-config` | Choose models, strict policy, and advisory workflow size. |
-| `/workflows` | Inspect runs and child sessions. |
-| `/workflow-stop [runId]` | Stop a run, or the latest active one. |
+<summary><strong>Tools, controls, and execution behavior</strong></summary>
 
 The tools are `workflow`, `workflow_reference`, `workflow_runs`, `workflow_saved`, and `workflow_config`. `workflow_runs` provides list/status/stop/skip actions. Deleting a saved script with `workflow_saved` archives it for recovery.
 
