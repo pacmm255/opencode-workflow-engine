@@ -272,7 +272,7 @@ export class GoalManager {
       if (op.stage === "defining") {
         const contract = result as ReturnType<typeof contractSchema.parse>;
         const issues = contractContamination(current.objective, contract.criteria);
-        if (issues.length) { this.rejectContract(current, issues); return; }
+        if (issues.length) { this.rejectContract(current, issues, contract); return; }
         current.draftContract = { ...contract, criteria: [...new Set(contract.criteria)] };
         current.summary = "Draft acceptance criteria prepared; checking their fidelity independently.";
         current.stage = "reviewing";
@@ -282,7 +282,8 @@ export class GoalManager {
           this.rejectContract(current, review.issues.length ? review.issues : [review.summary]); return;
         }
         current.criteria = current.draftContract.criteria; current.summary = current.draftContract.summary;
-        current.draftContract = undefined; current.contractRejections = 0; current.stage = "verifying";
+        current.draftContract = undefined; current.rejectedContract = undefined; current.contractFeedback = undefined;
+        current.contractRejections = 0; current.stage = "verifying";
       } else if (op.stage === "planning") {
         const decision = result as ReturnType<typeof decisionSchema.parse>;
         current.summary = decision.summary;
@@ -360,8 +361,10 @@ export class GoalManager {
     if (goal.lastNoticeKey === `${goal.mode}:${key}` && (goal.lastNoticeAt ?? 0) + 600_000 > this.now()) return;
     goal.notification = "pending"; goal.noticeKey = key;
   }
-  private rejectContract(goal: GoalState, issues: string[]) {
+  private rejectContract(goal: GoalState, issues: string[], candidate = goal.draftContract) {
     goal.contractRejections = (goal.contractRejections ?? 0) + 1;
+    if (candidate) goal.rejectedContract = candidate;
+    goal.contractFeedback = [...new Set([...(goal.contractFeedback ?? []), ...issues])].slice(-100);
     goal.draftContract = undefined; goal.criteria = []; goal.stage = "defining";
     goal.reason = `Acceptance contract rejected: ${issues.join("; ")}`.slice(0, 8000);
     goal.nextWakeAt = this.now() + this.backoff(goal.contractRejections);

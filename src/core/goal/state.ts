@@ -21,6 +21,8 @@ export type GoalState = {
   lastExecutionRunID?: string;
   lastExecutionResult?: string;
   draftContract?: { criteria: string[]; summary: string };
+  rejectedContract?: { criteria: string[]; summary: string };
+  contractFeedback?: string[];
   sources?: GoalSource[];
   contractRejections?: number;
   coordinator?: ModelSelection;

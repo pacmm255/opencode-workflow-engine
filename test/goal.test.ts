@@ -284,6 +284,30 @@ test("an independent contract reviewer can reject semantically invented requirem
   f.start(); const rejected = await f.until(goal => !!goal.reason?.includes("invents a merge target"));
   expect(rejected.criteria).toEqual([]);
   expect(f.calls.map(call => call.context.goal?.operation.stage)).toEqual(["defining", "reviewing"]);
+  expect(rejected.rejectedContract).toEqual(contract);
+  expect(rejected.contractFeedback).toEqual(["The checklist invents a merge target"]);
+});
+
+test("rejected checklists retain all review feedback through pause and correction, then clear it on approval", async () => {
+  const feedback = { approved: false, issues: ["Preserve the required statistical estimator"], summary: "Correction needed" };
+  const f = await fixture({ review: feedback, cycles: 0 }); f.start();
+  const rejected = await f.until(goal => goal.contractRejections === 1);
+  f.manager.control(rejected.id, "pause");
+  const resumed = f.manager.control(rejected.id, "resume");
+  expect(resumed.stage).toBe("defining");
+  expect(resumed.draftContract).toBeUndefined();
+  expect(resumed.rejectedContract).toEqual(contract);
+  expect(goalInput(resumed, f.context).script).toContain(criterion);
+  expect(goalInput(resumed, f.context).script).toContain(feedback.issues[0]!);
+  feedback.issues = ["Preserve real-browser verification"];
+  const corrected = await f.until(goal => goal.contractRejections === 2);
+  expect(corrected.contractFeedback).toEqual(["Preserve the required statistical estimator", "Preserve real-browser verification"]);
+  expect(goalInput(corrected, f.context).script).toContain("Preserve the required statistical estimator");
+  expect(goalInput(corrected, f.context).script).toContain("Preserve real-browser verification");
+  feedback.approved = true; feedback.issues = []; f.advance(60_000);
+  const completed = await f.until(goal => goal.mode === "completed");
+  expect(completed.rejectedContract).toBeUndefined();
+  expect(completed.contractFeedback).toBeUndefined();
 });
 
 test("paused drafts resume independent review without redrafting or accepting an older reviewer", async () => {
@@ -508,11 +532,14 @@ test("revising a poisoned goal discards generated scope and references but retai
     goal.lastExecutionRunID = "obsolete"; goal.lastRunID = "obsolete";
     goal.lastExecutionResult = "Obsolete plan-file-only result";
     goal.draftContract = { criteria: goal.criteria, summary: goal.summary };
+    goal.rejectedContract = goal.draftContract; goal.contractFeedback = ["Obsolete plan-file-only scope"];
   });
   const revised = f.manager.control(original.id, "edit", original.objective);
   expect(revised.originalObjective).toBe(original.objective);
   expect(revised.objectiveRevision).toBe(2);
   expect(revised.criteria).toEqual([]);
+  expect(revised.rejectedContract).toBeUndefined();
+  expect(revised.contractFeedback).toBeUndefined();
   expect(revised.sources).toBeUndefined();
   expect(revised.lastExecutionRunID).toBeUndefined();
   expect(revised.lastExecutionResult).toBeUndefined();

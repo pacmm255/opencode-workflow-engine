@@ -97,7 +97,8 @@ export class GoalStore {
       goal.plan = undefined; goal.stage = goal.criteria.length ? "verifying" : goal.draftContract ? "reviewing" : "defining";
       if (action === "edit") {
         goal.objective = objective!.trim(); goal.objectiveRevision++; goal.criteria = []; goal.stage = "defining";
-        goal.draftContract = undefined; goal.sources = undefined; goal.contractRejections = 0;
+        goal.draftContract = undefined; goal.rejectedContract = undefined; goal.contractFeedback = undefined;
+        goal.sources = undefined; goal.contractRejections = 0;
         goal.lastRunID = undefined; goal.lastExecutionRunID = undefined; goal.lastExecutionResult = undefined;
         goal.summary = "Objective revised by the user; deriving a new contract from the objective and its specification only.";
       }

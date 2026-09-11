@@ -381,8 +381,8 @@ The tools are `workflow`, `workflow_reference`, `workflow_runs`, `workflow_saved
 
 <table>
 <tr>
-<td width="33%" align="center"><h2>364</h2><p>unit tests passed</p></td>
-<td width="33%" align="center"><h2>14</h2><p>real-server integration tests passed</p></td>
+<td width="33%" align="center"><h2>365</h2><p>unit tests passed</p></td>
+<td width="33%" align="center"><h2>14</h2><p>real-server integration tests</p></td>
 <td width="33%" align="center"><h2>1.18.30</h2><p>OpenCode version verified</p></td>
 </tr>
 </table>
