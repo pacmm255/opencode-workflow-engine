@@ -78,6 +78,48 @@ const input = (client: AgentExecutionInput["client"], overrides: Partial<AgentEx
 const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false }
 
 describe("agent lifecycle over the real v2 HTTP transport", () => {
+  test("format fallback remembers an unreadable older cursor without hiding new assistant updates", async () => {
+    const transport = fake(child => ({ status: child.polls < 5 ? "busy" : "idle",
+      messages: [user(child), assistant(child, { structured: { answer: "ok" } })] }), { formatEncodingBug: true });
+    const result = await executeAgent(input(transport.client, { options: { schema, retries: 0 } }));
+    expect(result).toMatchObject({ status: "completed", value: { answer: "ok" } });
+    expect(transport.calls.filter(call => call.limit === "1")).toHaveLength(6);
+  });
+  test("local response guards stop oversized streaming output even without supported provider limits", async () => {
+    const transport = fake(child => ({ status: "busy", messages: [user(child), assistant(child, { time: { created: 2 } }, "x".repeat(200))] }));
+    const result = await executeAgent(input(transport.client, { options: { retries: 2 }, responseLimits: { characters: 100, tokens: 1000 } }));
+    expect(result).toMatchObject({ status: "failed", attempts: 1, failure: { kind: "output_limit" } });
+    expect(transport.aborted).toBe(1);
+  });
+
+  test("local response size guard excludes tool results and preserves multi-step work", async () => {
+    const transport = fake(child => {
+      const running = child.polls < 8;
+      const response = assistant(child, running ? { time: { created: 2 } } : {});
+      response.parts.push({ id: "prt_tool", sessionID: child.id, messageID: response.info.id, type: "tool", callID: "call", tool: "bash",
+        state: running ? { status: "running", input: { command: "long-test" }, time: { start: 1 } }
+          : { status: "completed", input: { command: "long-test" }, output: "x".repeat(2000), title: "Long tool", metadata: {}, time: { start: 1, end: 2 } } });
+      return { status: running ? "busy" : "idle", messages: [user(child), response] };
+    });
+    const result = await executeAgent(input(transport.client, { responseLimits: { characters: 1000, tokens: 1000 } }));
+    expect(result.status).toBe("completed");
+  });
+  test("truncated model output is never accepted or retried in another paid child", async () => {
+    const transport = fake(child => ({ messages: [user(child), assistant(child, { finish: "length" }, "unfinished answer")] }));
+    const result = await executeAgent(input(transport.client, { options: { retries: 3, timeoutMs: 2000 } }));
+    expect(result).toMatchObject({ status: "failed", value: null, attempts: 1, failure: { kind: "output_limit" } });
+    expect(transport.children).toHaveLength(1);
+  });
+  test("quota exhaustion preserves the provider reset and does not start a retry child", async () => {
+    const reset = Math.floor(Date.now() / 1000) + 7200;
+    const transport = fake(child => ({ messages: [user(child), assistant(child, { error: { name: "APIError", data: {
+      message: "The usage limit has been reached", statusCode: 429, isRetryable: true,
+      responseBody: JSON.stringify({ error: { type: "usage_limit_reached", resets_at: reset } }),
+    } } })] }));
+    const result = await executeAgent(input(transport.client, { options: { retries: 3, timeoutMs: 2000 } }));
+    expect(result.status).toBe("failed"); expect(result.attempts).toBe(1); expect(transport.children).toHaveLength(1);
+    expect(result.failure).toMatchObject({ kind: "quota", statusCode: 429, retryAt: reset * 1000 });
+  });
   test("child permissions preserve parent rules and tool flags cannot grant new access", async () => {
     const permission = [{ permission: "read", pattern: "private/*", action: "deny" }, { permission: "bash", pattern: "*", action: "ask" }]
     const transport = fake(undefined, { parentPermission: permission })

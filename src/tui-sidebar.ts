@@ -84,8 +84,10 @@ export function registerWorkflowSidebar(api: TuiPluginApi, options: WorkflowSide
             ...(currentGoal ? [element("box", { flexDirection: "column", paddingBottom: 1, onMouseDown: () => options.openGoal?.() }, [
               text("Workflow goal", theme.text),
               text(sidebarText(currentGoal.objective, 120)),
-              text(`${currentGoal.mode} · ${currentGoal.operation?.stage ?? currentGoal.stage}${currentGoal.operation && currentGoal.mode !== "active" ? " · stopping" : ""}`, currentGoal.mode === "completed" ? theme.success : theme.primary),
-              text(`${currentGoal.evidence.filter(item => item.met).length}/${currentGoal.criteria.length} checks · ${currentGoal.cycle} workflows`),
+              text(`${currentGoal.mode}${currentGoal.waiting ? ` · ${currentGoal.waiting.kind}` : ""} · ${currentGoal.operation?.stage ?? currentGoal.stage}${currentGoal.operation && currentGoal.mode !== "active" ? " · stopping" : ""}`, currentGoal.mode === "completed" ? theme.success : theme.primary),
+              text(`${currentGoal.evidence.filter(item => item.met).length}/${currentGoal.criteria.length} checks · ${currentGoal.cycle} workflow attempts`),
+              ...(currentGoal.waiting?.until ? [text(`Retry after ${new Date(currentGoal.waiting.until).toISOString()}`, theme.warning)] : []),
+              ...(currentGoal.coordinator ? [text(`Supervisor: ${currentGoal.coordinator.providerID}/${currentGoal.coordinator.modelID}${currentGoal.coordinator.variant ? ` · ${currentGoal.coordinator.variant}` : ""}`)] : []),
               ...(currentGoal.reason ? [text(sidebarText(currentGoal.reason, 160), theme.warning)] : []),
               text("/workflow-goals · controls"),
             ])] : []),

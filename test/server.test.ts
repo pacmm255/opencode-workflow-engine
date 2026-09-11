@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import type { PluginInput, ToolContext } from "@opencode-ai/plugin";
@@ -7,6 +7,8 @@ import plugin from "../src/server.ts";
 import { defaultConfig, loadConfig } from "../src/core/config.ts";
 import { authoringSkillContent } from "../src/core/authoring-skill.ts";
 import { goalInstruction, workflowInstruction } from "../src/core/commands.ts";
+import { GoalStore } from "../src/core/goal/store.ts";
+import { runsDirectory } from "../src/core/paths.ts";
 import { UltracodeSessionStore, ultracodeOriginKey, workflowResultKey } from "../src/core/ultracode.ts";
 
 const previousConfigHome = process.env.XDG_CONFIG_HOME;
@@ -26,7 +28,7 @@ afterEach(async () => {
   else process.env.XDG_CACHE_HOME = previousCacheHome;
 });
 
-async function fixture(options: { malformed?: boolean; hold?: Promise<void>; parentID?: string; variants?: string[] } = {}) {
+async function fixture(options: { malformed?: boolean; hold?: Promise<void>; parentID?: string; variants?: string[]; childRunID?: string } = {}) {
   const root = await mkdtemp(join(tmpdir(), "workflow-server-test-"));
   process.env.XDG_CONFIG_HOME = join(root, "config");
   process.env.XDG_DATA_HOME = join(root, "data");
@@ -51,6 +53,7 @@ async function fixture(options: { malformed?: boolean; hold?: Promise<void>; par
       if (path === "/session/ses_parent/message/msg_parent") return Response.json({ info: { role: "assistant", providerID: "test", modelID: "nested/model" }, parts: [] });
       if (path === "/session/ses_parent/message") return Response.json(history);
       if (path === "/session/ses_parent") return Response.json({ id: "ses_parent", parentID: options.parentID, model: { providerID: "test", id: "nested/model" } });
+      if (path === "/session/ses_child") return Response.json({ id: "ses_child", parentID: "ses_parent", directory, metadata: { workflow: { runId: options.childRunID } } });
       throw new Error(`Unexpected API request: ${path}`);
     }) as typeof fetch,
   };
@@ -126,6 +129,62 @@ test("active goals suppress competing parent writes and survive compaction witho
   await f.hooks["experimental.session.compacting"]?.({ sessionID: "ses_parent" }, compact);
   expect(compact.context.join(" ")).toContain("Implement within the existing scope");
   await f.execute("workflow_goal", { action: "pause" });
+});
+
+test("goal-child hooks bound output and protect pinned specifications without changing ordinary sessions", async () => {
+  const id = "wf_00000000-0000-4000-8000-000000000001";
+  const f = await fixture({ childRunID: id });
+  const started = JSON.parse(await f.execute("workflow_goal", { action: "start", objective: "Implement the plan plan.md" }));
+  await f.execute("workflow_goal", { action: "pause" });
+  const path = join(f.directory, "plan.md");
+  await mkdir(f.directory, { recursive: true });
+  await writeFile(path, "Original requirements");
+  await symlink(path, join(f.directory, "alias.md"));
+  const store = new GoalStore(f.directory);
+  try { store.change(started.goal.id, "test-sources", goal => { goal.sources = [{ path, snapshot: path, hash: "test" }]; }); }
+  finally { store.close(); }
+  const runDir = join(runsDirectory(), id);
+  await mkdir(runDir, { recursive: true });
+  await writeFile(join(runDir, "run.json"), JSON.stringify({ id, directory: f.directory, runDir, sessionID: "ses_parent", status: "completed",
+    agents: [{ sessionID: "ses_child", directory: f.directory }], goal: { id: started.goal.id, operation: { stage: "verifying" } } }));
+  const input = { sessionID: "ses_child", model: { limit: { output: 131072 } } } as any;
+  const output = { maxOutputTokens: 100000 } as any;
+  await f.hooks["chat.params"]?.(input, output);
+  expect(output.maxOutputTokens).toBe(8192);
+  output.maxOutputTokens = undefined;
+  await f.hooks["chat.params"]?.({ ...input, provider: { source: "custom", options: {} } }, output);
+  expect(output.maxOutputTokens).toBeUndefined();
+  output.maxOutputTokens = 1024;
+  await f.hooks["chat.params"]?.(input, output);
+  expect(output.maxOutputTokens).toBe(1024);
+  output.maxOutputTokens = 100000;
+  await f.hooks["chat.params"]?.({ ...input, sessionID: "ses_parent" }, output);
+  expect(output.maxOutputTokens).toBe(100000);
+  for (const filePath of [path, "plan.md", "alias.md"]) await expect(f.hooks["tool.execute.before"]?.(
+    { sessionID: "ses_child", tool: "write", callID: "call" }, { args: { filePath } },
+  )).rejects.toThrow("pinned acceptance input");
+  await expect(f.hooks["tool.execute.before"]?.({ sessionID: "ses_child", tool: "apply_patch", callID: "call" },
+    { args: { patchText: "*** Begin Patch\n*** Move to: plan.md\n*** End Patch" } })).rejects.toThrow("pinned acceptance input");
+  await expect(f.hooks["tool.execute.before"]?.({ sessionID: "ses_child", tool: "get_goal", callID: "call" }, { args: {} })).rejects.toThrow("another goal system");
+  await f.hooks["tool.execute.before"]?.({ sessionID: "ses_child", tool: "write", callID: "call" }, { args: { filePath: "implementation.ts" } });
+  await f.hooks["tool.execute.before"]?.({ sessionID: "ses_parent", tool: "write", callID: "call" }, { args: { filePath: path } });
+  // A worktree plugin must read its original project's goal, not look for a goal in the checkout.
+  const originalDirectory = join(f.root, "original-project");
+  await mkdir(originalDirectory);
+  const originalStore = new GoalStore(originalDirectory);
+  let originalID: string;
+  try {
+    const original = originalStore.create({ sessionID: "ses_parent", agent: "build", model: { providerID: "test", modelID: "nested/model" }, objective: "Implement plan.md" });
+    originalID = original.id;
+    originalStore.control(original.id, "pause");
+    originalStore.change(original.id, "test-sources", goal => { goal.sources = [{ path: join(originalDirectory, "plan.md"), snapshot: join(originalDirectory, "snapshot.txt"), hash: "test" }]; });
+  } finally { originalStore.close(); }
+  await writeFile(join(runDir, "run.json"), JSON.stringify({ id, directory: originalDirectory, runDir, sessionID: "ses_parent", status: "completed",
+    agents: [{ sessionID: "ses_child", directory: f.directory }], goal: { id: originalID, operation: { stage: "executing" } } }));
+  output.maxOutputTokens = 100000;
+  await f.hooks["chat.params"]?.(input, output);
+  expect(output.maxOutputTokens).toBe(16384);
+  await expect(f.hooks["tool.execute.before"]?.({ sessionID: "ses_child", tool: "write", callID: "call" }, { args: { filePath: "plan.md" } })).rejects.toThrow("pinned acceptance input");
 });
 
 test("automatic keyword triggering requires trusted human metadata and stays one-shot", async () => {

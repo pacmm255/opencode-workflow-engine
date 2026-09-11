@@ -92,9 +92,15 @@ export class GoalStore {
       goal.mode = action === "stop" ? "cancelled" : action === "pause" ? "paused" : "active";
       goal.reason = action === "pause" ? "Paused by the user; cancelling owned work." : action === "stop" ? "Stopped by the user; cancelling owned work." : undefined;
       goal.nextWakeAt = 0; goal.failures = 0; goal.notification = undefined;
+      goal.waiting = undefined; goal.noticeKey = undefined;
       goal.evidence = []; goal.verifiedAt = undefined; goal.fingerprint = undefined;
-      goal.plan = undefined; goal.stage = goal.criteria.length ? "verifying" : "defining";
-      if (action === "edit") { goal.objective = objective!.trim(); goal.objectiveRevision++; goal.criteria = []; goal.stage = "defining"; }
+      goal.plan = undefined; goal.stage = goal.criteria.length ? "verifying" : goal.draftContract ? "reviewing" : "defining";
+      if (action === "edit") {
+        goal.objective = objective!.trim(); goal.objectiveRevision++; goal.criteria = []; goal.stage = "defining";
+        goal.draftContract = undefined; goal.sources = undefined; goal.contractRejections = 0;
+        goal.lastRunID = undefined; goal.lastExecutionRunID = undefined; goal.lastExecutionResult = undefined;
+        goal.summary = "Objective revised by the user; deriving a new contract from the objective and its specification only.";
+      }
     }, { objective });
     if (!changed) throw new Error("Goal not found");
     return changed;
@@ -110,5 +116,6 @@ export class GoalStore {
   owns(owner: string, now = Date.now()): boolean {
     return !!this.db.query("SELECT 1 FROM lease WHERE slot=1 AND owner=? AND expires>?").get(owner, now);
   }
+  liveOwner(now = Date.now()): boolean { return !!this.db.query("SELECT 1 FROM lease WHERE slot=1 AND expires>?").get(now); }
   release(owner: string) { this.db.query("DELETE FROM lease WHERE slot=1 AND owner=?").run(owner); }
 }

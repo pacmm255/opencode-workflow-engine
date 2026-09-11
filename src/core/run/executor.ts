@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto"
+import { isAbsolute, relative, resolve } from "node:path"
 import type { AssistantMessage, OpencodeClient, Part, PermissionRule, SessionMessagesResponse2 } from "@opencode-ai/sdk/v2"
 import { validateSchema } from "./schema.ts"
+import { executionFailure, type ExecutionFailure } from "./failure.ts"
 
 export { UnsatisfiableSchemaError } from "./schema.ts"
 
@@ -25,6 +27,9 @@ export interface AgentExecutionInput {
   signal?: AbortSignal
   availableAgents?: readonly { name: string; mode?: string; permission?: readonly PermissionRule[] }[]
   workflow?: { runId: string; agentId: string }
+  protectedPaths?: readonly string[]
+  /** Local safeguards for transports that cannot accept a wire-level output limit. Not a goal budget. */
+  responseLimits?: { characters: number; tokens: number }
   onSession?: (sessionID: string, directory: string) => void | Promise<void>
   /** Deltas, including usage from failed attempts and aborted children. */
   onUsage?: (usage: AgentUsage) => void
@@ -36,6 +41,7 @@ export interface AgentExecutionResult {
   sessionID?: string
   directory?: string
   error?: string
+  failure?: ExecutionFailure
   usage: AgentUsage
   attempts: number
 }
@@ -60,7 +66,7 @@ const isConfigurationError = (error: unknown): boolean => {
 const unwrap = <T>(result: { data?: T; error?: unknown }): T => {
   if (result.error) {
     if (isConfigurationError(result.error)) throw new AgentConfigurationError(message(result.error))
-    throw new AgentFailedError(message(result.error))
+    throw new AgentFailedError(message(result.error), { cause: result.error })
   }
   return result.data as T
 }
@@ -155,11 +161,13 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
   let sessionID: string | undefined
   let sessionCreationUncertain = false
   let paginatedMessages = false
+  const unreadableCursors = new Set<string>()
   let promptSubmitted = false
   let activityObserved = false
   let directory = input.directory
   let error: string | undefined
-  const result = (status: AgentExecutionResult["status"], value: unknown = null): AgentExecutionResult => ({ value, status, sessionID, directory, error, usage: { ...usage }, attempts })
+  let failure: ExecutionFailure | undefined
+  const result = (status: AgentExecutionResult["status"], value: unknown = null): AgentExecutionResult => ({ value, status, sessionID, directory, error, ...(failure ? { failure } : {}), usage: { ...usage }, attempts })
   const account = (messages: SessionMessagesResponse2): void => {
     for (const entry of messages) {
       if (entry.info.role !== "assistant") continue
@@ -193,8 +201,12 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
     const cursors = new Set<string>()
     let before: string | undefined
     while (true) {
+      if (before && unreadableCursors.has(before)) return messages
       const response = await cancellable(client.session.messages({ sessionID, directory, limit: 1, before }, { signal }), signal)
-      if (response.error && isFormatEncodingError(response.error)) return messages
+      if (response.error && isFormatEncodingError(response.error)) {
+        if (before) unreadableCursors.add(before)
+        return messages
+      }
       const page = unwrap(response) ?? []
       messages.push(...page)
       if (userID && page.some((entry) => entry.info.id === userID)) return messages
@@ -249,9 +261,11 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
     const cancelled = externalAbort()
     if (cancelled) return cancelled
     attempts++
+    failure = undefined
     sessionID = undefined
     sessionCreationUncertain = false
     paginatedMessages = false
+    unreadableCursors.clear()
     promptSubmitted = false
     activityObserved = false
     directory = input.directory
@@ -268,6 +282,11 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
         metadata: input.workflow ? { workflow: input.workflow } : undefined,
         permission: [...(input.availableAgents?.find(candidate => candidate.name === parent.agent)?.permission ?? []), ...(parent.permission ?? []),
           ...Object.entries(options.tools ?? {}).filter(([, enabled]) => !enabled).map(([permission]) => ({ permission, pattern: "*", action: "deny" as const })),
+          ...(input.protectedPaths ?? []).flatMap(pattern => {
+            const local = relative(input.directory, pattern)
+            const paths = [pattern, ...(!isAbsolute(local) && local !== ".." && !local.startsWith("../") ? [resolve(directory, local)] : [])]
+            return [...new Set(paths)].map(pattern => ({ permission: "edit", pattern, action: "deny" as const }))
+          }),
           { permission: "workflow*", pattern: "*", action: "deny" }, { permission: "task", pattern: "*", action: "deny" }],
       }, { signal }).then(async (response) => {
         sessionCreationUncertain = false
@@ -318,7 +337,17 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
             if ((userIndex >= 0 ? index > userIndex : !!last) && entry.info.role === "user" && entry.parts.length && (entry.parts.every((part) => part.type === "text" && part.synthetic) || (entry.parts.length === 1 && entry.parts[0].type === "text" && entry.parts[0].text === prompt))) parents.add(entry.info.id)
             if (entry.info.role === "assistant" && parents.has(entry.info.parentID)) last = { info: entry.info, parts: entry.parts }
           }
-          if (last) activityObserved = true
+          if (last) {
+            activityObserved = true
+            if (input.responseLimits) {
+              const characters = last.parts.reduce((total, part) => total + (
+                part.type === "text" || part.type === "reasoning" ? part.text.length
+                  : part.type === "tool" ? (part.state.status === "pending" ? part.state.raw.length : JSON.stringify(part.state.input).length) : 0
+              ), 0)
+              if (characters > input.responseLimits.characters || last.info.tokens.output + last.info.tokens.reasoning > input.responseLimits.tokens)
+                throw new AgentFailedError("Model exceeded the local per-response output length limit")
+            }
+          }
           if (!status || status.type === "idle") {
             if (last?.info.time.completed !== undefined && (last.info.finish !== "tool-calls" || last.info.error || last.info.structured !== undefined)) final = last
             else if (!last) {
@@ -330,10 +359,12 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
           } else incompleteSince = undefined
           if (!final) await delay(interval, signal)
         }
+        if (final.info.finish === "length" && final.info.error?.name !== "MessageAbortedError")
+          throw new AgentFailedError("Model reached its output length limit before completing the task")
         if (final.info.error) {
           if (final.info.error.name === "MessageAbortedError") { error = message(final.info.error); return result("skipped") }
           if (isConfigurationError(final.info.error)) throw new AgentConfigurationError(message(final.info.error))
-          throw new AgentFailedError(message(final.info.error))
+          throw new AgentFailedError(message(final.info.error), { cause: final.info.error })
         }
         if (!final.info.finish && final.info.structured === undefined) {
           error = "Child stopped before producing a final answer"
@@ -352,12 +383,15 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
       }
     } catch (caught) {
       error = message(caught)
+      failure = executionFailure(caught)
       const stopped = await stop()
       if (!stopped) error += "; could not confirm child abort, so no retry was started"
       const cancelled = externalAbort()
       if (cancelled) return cancelled
       if (isConfigurationError(caught)) throw caught instanceof AgentConfigurationError ? caught : new AgentConfigurationError(error)
       if (!stopped) return result("failed")
+      // These require a cooldown or configuration/user action, not a fresh paid child.
+      if (failure && ["quota", "rate_limit", "permission", "authentication", "configuration", "output_limit"].includes(failure.kind)) return result("failed")
       if (caught instanceof AgentTimeoutError) return result("failed")
       if (attempt === retries) return result("failed")
     } finally {

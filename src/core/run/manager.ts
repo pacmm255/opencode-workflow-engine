@@ -34,6 +34,7 @@ export type RunContext = {
   goal?: RunState["goal"];
   guard?: () => void;
   goalScope?: string;
+  protectedPaths?: string[];
 };
 const agentOptions = z.object({
   label: z.string().max(200).optional(), phase: z.string().max(200).optional(),
@@ -110,6 +111,7 @@ export class RunManager {
           if (!live) {
             state.status = "interrupted"; state.finishedAt = Date.now();
             state.error = "The process exited before this run completed. Resume from its successful journal entries.";
+            for (const agent of state.agents) if (["running", "queued"].includes(agent.status)) { agent.status = "failed"; agent.error ??= "Owning process exited; work requires reconciliation"; }
             await atomicJSON(join(state.runDir, "run.json"), state);
           }
         }
@@ -150,6 +152,9 @@ export class RunManager {
     const state = await this.get(id);
     if (state.status !== "running") return;
     if (userInitiated) this.onStop?.(state);
+    const live = this.active.get(id);
+    if (live) live.state.stopReason = userInitiated ? "user" : "supervisor";
+    else { state.stopReason = userInitiated ? "user" : "supervisor"; await atomicJSON(join(state.runDir, "run.json"), state); }
     await this.writeControl(state, "STOP");
     this.active.get(id)?.controller.abort(failure("RunAbortedError", userInitiated ? "User stopped the workflow" : "Goal supervisor interrupted the workflow"));
   }
@@ -311,7 +316,12 @@ export class RunManager {
         await journal.append({ type: "agent.start", agentId: row.id, sequence, key, prompt, options, model, phase: row.phase });
         const result = await this.execute({ client: this.client, parentID: state.sessionID, directory: this.directory, prompt,
           options: { ...options, agentType, timeoutMs: options.timeoutMs ?? context.config.limits.agentTimeoutMs,
+            ...(state.goal ? { tools: { ...options.tools, create_goal: false, get_goal: false, update_goal: false } } : {}),
             retries: options.retries ?? context.config.defaults.retries }, model, signal, availableAgents: context.agents,
+          protectedPaths: context.protectedPaths,
+          ...(state.goal ? { responseLimits: state.goal.operation.stage === "executing"
+            ? { characters: 262_144, tokens: 65_536 }
+            : { characters: 131_072, tokens: 32_768 } } : {}),
           workflow: { runId: state.id, agentId: row.id },
           onSession: async (sessionID, directory) => {
             row.sessionID = sessionID; row.directory = directory;
@@ -322,7 +332,7 @@ export class RunManager {
           onUsage: (delta) => { for (const key of ["input", "output", "reasoning", "cost"] as const) { row.usage[key] += delta[key]; state.usage[key] += delta[key]; } },
         });
         checkAbort(signal);
-        row.status = result.status; row.error = result.error; row.attempts = result.attempts;
+        row.status = result.status; row.error = result.error; row.failure = result.failure; row.attempts = result.attempts;
         row.sessionID = result.sessionID ?? row.sessionID; row.directory = result.directory ?? row.directory;
         await journal.append({ type: result.status === "completed" ? "agent.result" : result.status === "skipped" ? "agent.skipped" : "agent.error",
           agentId: row.id, sequence, key, value: result.value, error: row.error, usage: row.usage, phase: row.phase });
@@ -361,6 +371,10 @@ export class RunManager {
       });
       checkAbort(controller.signal);
       if (pending.size) warn("The script returned with unfinished agent calls; these calls were aborted. Await every agent or orchestration promise.");
+      // A private goal operation is successful only when all of its children succeeded.
+      // Ordinary scripts retain the public nullable-agent recovery semantics.
+      if (state.goal && (state.result == null || state.agents.some(agent => !["completed", "cached"].includes(agent.status))))
+        throw failure("GoalOperationError", state.agents.find(agent => agent.error)?.error ?? "Goal operation returned no usable result");
       state.status = "completed";
     } catch (error) {
       const name = error instanceof Error ? error.name : "";
@@ -422,7 +436,7 @@ export class RunManager {
     this.closing = true;
     this.lifecycle.abort(failure("RunAbortedError", "Plugin disposed"));
     if (this.notifyTimer) clearInterval(this.notifyTimer);
-    for (const run of this.active.values()) run.controller.abort(failure("RunAbortedError", "Plugin disposed"));
+    for (const run of this.active.values()) { run.state.stopReason = "shutdown"; run.controller.abort(failure("RunAbortedError", "Plugin disposed")); }
     await Promise.allSettled([...this.active.values()].map((run) => run.done));
   }
 }

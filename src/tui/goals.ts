@@ -16,7 +16,11 @@ export function registerGoalControls(api: TuiPluginApi, input: {
   };
   const get = (sessionID: string): GoalState | undefined => {
     if (disposed) return;
-    if (input.local) return store().current(sessionID);
+    if (input.local) {
+      const goal = store().current(sessionID);
+      if (goal?.mode === "active" && !store().liveOwner()) return { ...goal, waiting: { kind: "supervisor offline", since: goal.updatedAt } };
+      return goal;
+    }
     const data = api.state.session.get(sessionID)?.metadata?.workflowGoal as GoalState | undefined;
     return data?.version === 1 && data.sessionID === sessionID && typeof data.objective === "string"
       && Array.isArray(data.criteria) && Array.isArray(data.evidence) && typeof data.mode === "string" && data.usage ? data : undefined;

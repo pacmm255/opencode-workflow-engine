@@ -1,5 +1,7 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
 import { randomUUID } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { createOpencodeClient, type Agent, type Config } from "@opencode-ai/sdk/v2";
 import { ensureAuthoringSkill } from "./core/authoring-skill";
 import { commands, goalInstruction, workflowInstruction } from "./core/commands";
@@ -10,6 +12,8 @@ import { catalogFromProviders, resolveModel, type ModelEntry, type ModelSelectio
 import { reference } from "./core/reference";
 import { SavedWorkflows } from "./core/saved";
 import { RunManager } from "./core/run/manager";
+import type { RunState } from "./core/run/state";
+import { validateRunID } from "./core/paths";
 import { report } from "./core/run/report";
 import { workflowPlanSchema } from "./core/plan";
 import { effectiveUltracode, exactUltracodeVariant, UltracodeSessionStore, ultracodeInstruction, ultracodeTrigger,
@@ -68,6 +72,30 @@ const WorkflowPlugin: Plugin = async ({ client: original, directory, serverUrl }
     return { sessionID: goal.sessionID, agent: goal.agent, model: goal.model, config, catalog, agents,
       ...(settings.effort ? { ultracode: { messageID: goal.id, task: goal.objective, source: "session" as const, effort: settings.effort } } : {}) };
   } });
+  const childRuns = new Map<string, { runID: string; directory: string; parentID?: string } | null>();
+  const goalChild = async (sessionID: string) => {
+    if (!childRuns.has(sessionID)) {
+      const { data: child } = await client.session.get({ sessionID, directory }, { throwOnError: true, signal: AbortSignal.timeout(3000) });
+      const runID = (child.metadata?.workflow as { runId?: string } | undefined)?.runId;
+      if (childRuns.size >= 2000) childRuns.delete(childRuns.keys().next().value!);
+      childRuns.set(sessionID, runID ? { runID, directory: child.directory, parentID: child.parentID } : null);
+    }
+    const child = childRuns.get(sessionID);
+    if (!child) return;
+    // A worktree has a different plugin instance, while the run belongs to its original project.
+    // Read the durable ownership record; never weaken RunManager's mutation ownership checks.
+    const runID = validateRunID(child.runID);
+    const run: RunState = JSON.parse(await readFile(join(manager.root, runID, "run.json"), "utf8"));
+    if (!run.goal) return;
+    if (run.id !== runID || resolve(run.runDir) !== resolve(manager.root, runID) || run.sessionID !== child.parentID
+      || !run.agents.some(agent => agent.sessionID === sessionID && resolve(agent.directory ?? run.directory) === resolve(child.directory)))
+      throw failure("GoalOwnershipError", "Goal child does not match its durable parent/run identity");
+    const original = resolve(run.directory) === resolve(directory) ? goalStore : new GoalStore(run.directory);
+    try {
+      const goal = original.get(run.goal.id);
+      return goal ? { run, goal, directory: child.directory } : undefined;
+    } finally { if (original !== goalStore) original.close(); }
+  };
   return {
     config: async (current) => {
       current.command ??= {};
@@ -87,6 +115,18 @@ const WorkflowPlugin: Plugin = async ({ client: original, directory, serverUrl }
       if (toolID !== "workflow") return;
       try { output.description = `${output.description}\n${planningGuidance(config, catalog, agents)}`; } catch { /* Never fail an assistant step while listing tools. */ }
       if (!disposed && Date.now() - refreshed > 30_000) void refresh().catch(() => {});
+    },
+    "chat.params": async (input, output) => {
+      const owned = await goalChild(input.sessionID);
+      if (!owned) return;
+      // OAuth/custom transports may intentionally omit wire limits (ChatGPT rejects max_output_tokens).
+      // The executor independently bounds observed output; configured operation timeouts still apply.
+      if (input.provider?.source === "custom" || typeof input.provider?.options?.fetch === "function") return;
+      // Per-response resource guard, not a goal-wide budget. Includes malformed tool-call streams.
+      const limit = owned.run.goal!.operation.stage === "executing" ? 16_384 : 8192;
+      const catalogLimit = input.model.limit?.output;
+      output.maxOutputTokens = Math.min(limit, output.maxOutputTokens ?? limit,
+        typeof catalogLimit === "number" && catalogLimit > 0 ? catalogLimit : limit);
     },
     "command.execute.before": async (input, output) => {
       if (ownsGoalCommand && input.command === "workflow-goal") {
@@ -187,6 +227,25 @@ const WorkflowPlugin: Plugin = async ({ client: original, directory, serverUrl }
       const goal = goalStore.current(input.sessionID);
       if (goal && (goal.mode === "active" || goal.operation) && ["write", "edit", "apply_patch", "bash", "task"].includes(input.tool))
         throw failure("GoalOwnershipError", "The goal supervisor owns execution. Pause the goal before independent changes; status and goal controls remain available.");
+      if (["write", "edit", "apply_patch", "create_goal", "get_goal", "update_goal"].includes(input.tool)) {
+        const owned = await goalChild(input.sessionID);
+        if (owned) {
+          if (["create_goal", "get_goal", "update_goal"].includes(input.tool)) throw failure("GoalOwnershipError", "This child belongs to workflow_goal; do not invoke another goal system.");
+          const args = output.args as Record<string, unknown>;
+          const paths = [args.filePath, args.file_path, args.path].filter((path): path is string => typeof path === "string");
+          if (typeof args.patchText === "string") for (const match of args.patchText.matchAll(/^\*\*\* (?:(?:Update|Delete|Add) File|Move to):\s*(.+)$/gm)) paths.push(match[1]!);
+          const protectedPaths = new Set(owned.goal.sources?.flatMap(source => {
+            const local = relative(owned.run.directory, source.path);
+            return [source.path, source.snapshot, ...(!isAbsolute(local) && local !== ".." && !local.startsWith("../") ? [resolve(owned.directory, local)] : [])];
+          }));
+          const canonical = await Promise.all(paths.map(async path => {
+            const resolved = resolve(owned.directory, path);
+            return await realpath(resolved).catch(() => resolved);
+          }));
+          if (canonical.some(path => protectedPaths.has(path)))
+            throw failure("GoalSpecificationError", "The referenced plan is a pinned acceptance input. Implement its code/tests; do not rewrite its scope, merge policy, or acceptance requirements.");
+        }
+      }
       const task = planningRequests.get(input.sessionID);
       if (task === undefined) return;
       // Scope this to unrelated orchestration helpers during /workflow planning.

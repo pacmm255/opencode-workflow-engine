@@ -9,12 +9,14 @@ import type { RunContext, RunManager } from "../run/manager";
 import type { RunState } from "../run/state";
 import { exactUltracodeVariant } from "../ultracode";
 import { workspaceFingerprint } from "./fingerprint";
-import { contractSchema, decisionSchema, goalInput, goalScope, verificationSchema } from "./prompts";
+import { contractReviewSchema, contractSchema, decisionSchema, goalInput, goalScope, verificationSchema } from "./prompts";
+import { captureGoalSources, changedGoalSources, contractContamination } from "./contract";
+import { executionFailure } from "../run/failure";
 import { goalResultKey, goalSummary, type GoalOperation, type GoalState } from "./state";
 import { GoalStore } from "./store";
 
 type Options = {
-  intervalMs?: number; now?: () => number; fingerprint?: (directory: string) => Promise<string>;
+  intervalMs?: number; now?: () => number; fingerprint?: (directory: string, signal?: AbortSignal) => Promise<string>;
   requestTimeoutMs?: number;
   context(goal: GoalState): Promise<RunContext>;
 };
@@ -29,9 +31,10 @@ export class GoalManager {
   private ticking?: Promise<void>;
   private live = new Map<string, Promise<RunState>>();
   private now: () => number;
-  private fingerprint: (directory: string) => Promise<string>;
+  private fingerprint: (directory: string, signal?: AbortSignal) => Promise<string>;
   private lastPublish = new Map<string, number>();
   private reconciliation = new Map<string, number>();
+  private permissionChecks = new Map<string, number>();
   constructor(readonly client: OpencodeClient, readonly runs: RunManager, readonly store: GoalStore, readonly options: Options) {
     this.now = options.now ?? Date.now;
     this.fingerprint = options.fingerprint ?? workspaceFingerprint;
@@ -76,9 +79,9 @@ export class GoalManager {
     }).finally(() => { this.ticking = undefined; });
     return this.ticking;
   }
-  private async request<T>(operation: (signal: AbortSignal) => PromiseLike<T>, timeout = this.options.requestTimeoutMs ?? 15_000): Promise<T> {
+  private async request<T>(operation: (signal: AbortSignal) => PromiseLike<T>, timeout = this.options.requestTimeoutMs ?? 15_000, label = "host request"): Promise<T> {
     const deadline = new AbortController();
-    const timer = setTimeout(() => deadline.abort(new Error("Goal request timed out; waiting for the host")), timeout);
+    const timer = setTimeout(() => deadline.abort(new Error(`Goal ${label} timed out after ${timeout} ms`)), timeout);
     const signal = AbortSignal.any([deadline.signal, this.lifecycle.signal]);
     let abort: (() => void) | undefined;
     try {
@@ -127,25 +130,36 @@ export class GoalManager {
     if (statuses[goal.sessionID] && statuses[goal.sessionID]!.type !== "idle") return;
     if ((await this.request(() => this.runs.list())).some(run => run.status === "running")) return;
     let context = await this.request(() => this.options.context(goal));
-    // Never silently move a missing selected model to another provider.
-    const model = resolveModel({ config: context.config, catalog: context.catalog, sessionModel: context.model,
-      requested: context.config.models.allowed.length ? context.config.models.allowed[0] : undefined });
-    if (!context.config.models.allowed.length && context.config.models.default !== "session"
+    // The configured default is the coordinator. Pool ordering selects neither quality nor priority.
+    if (context.config.models.default !== "session"
       && !context.catalog.some(entry => entry.id === context.config.models.default))
       throw new Error("The configured default goal model is unavailable; waiting for configuration repair.");
+    const model = resolveModel({ config: context.config, catalog: context.catalog, sessionModel: context.model });
     const entry = context.catalog.find(entry => entry.id === `${model.providerID}/${model.modelID}`);
     if (!entry?.toolcall || entry.status === "deprecated") throw new Error("The configured goal model is unavailable; repair the workflow pool to continue.");
     if (context.ultracode?.effort) model.variant = exactUltracodeVariant(entry, context.ultracode.effort) ?? model.variant;
-    context = { ...context, model, goalScope: goalScope(goal) };
+    if (goal.sources === undefined) {
+      const sources = await this.request(() => captureGoalSources(goal, this.store.root), 15_000, "specification snapshot");
+      const captured = this.store.change(goal.id, "sources", current => {
+        if (current.generation !== goal.generation || current.mode !== "active" || !this.store.owns(this.owner, this.now())) return false;
+        current.sources = sources;
+      }, sources, this.now());
+      if (!captured) return;
+      goal = captured;
+    }
+    const changed = await changedGoalSources(goal.sources);
+    if (changed.length) { this.block(goal.id, `Pinned goal specification changed: ${changed.join(", ")}. Restore it or explicitly edit the goal to accept revised requirements.`); return; }
+    context = { ...context, model, goalScope: goalScope(goal), protectedPaths: goal.sources?.flatMap(source => [source.path, source.snapshot]) };
     const input = goalInput(goal, context);
     // Validate a whole generated plan BEFORE reserving and launching any worker.
     if (input.plan) preparePlan(input.plan, context);
-    const fingerprint = goal.stage === "verifying" ? await this.request(() => this.fingerprint(goal.directory), 30_000) : undefined;
+    const fingerprint = goal.stage === "verifying" ? await this.request(signal => this.fingerprint(goal.directory, signal), 120_000, "workspace fingerprint") : undefined;
     const operation: GoalOperation = { id: randomUUID(), runID: `wf_${randomUUID()}`, generation: goal.generation,
       stage: goal.stage, owner: this.owner, startedAt: this.now(), ...(fingerprint ? { fingerprint } : {}) };
     const reserved = this.store.change(goal.id, "reserved", current => {
       if (this.closing || !this.store.owns(this.owner, this.now()) || current.mode !== "active" || current.operation || current.generation !== goal.generation) return false;
       current.operation = operation;
+      current.coordinator = model; current.waiting = undefined;
       if (operation.stage === "executing") current.cycle++;
     }, operation, this.now());
     if (!reserved) return;
@@ -167,6 +181,7 @@ export class GoalManager {
     const op = goal.operation!;
     if (this.live.has(op.runID)) {
       if (goal.mode !== "active" || goal.generation !== op.generation) await this.runs.stop(op.runID, false);
+      else await this.permissionWait(goal);
       return;
     }
     let run: RunState;
@@ -177,7 +192,7 @@ export class GoalManager {
       this.store.change(goal.id, "undispatched", current => {
         if (current.operation?.id !== op.id) return false;
         delete current.operation;
-        current.stage = current.criteria.length ? "planning" : "defining";
+        current.stage = current.criteria.length ? "planning" : current.draftContract ? "reviewing" : "defining";
       }, op, this.now());
       return;
     }
@@ -199,7 +214,9 @@ export class GoalManager {
     let problem: string | undefined;
     if (valid && clean) {
       try {
-        result = op.stage === "defining" ? contractSchema.parse(run.result) : op.stage === "planning" ? decisionSchema.parse(run.result)
+        const changed = await changedGoalSources(goal.sources);
+        if (changed.length) throw new Error(`Pinned goal specification changed: ${changed.join(", ")}. Restore it or explicitly revise the goal; generated requirements are not accepted.`);
+        result = op.stage === "defining" ? contractSchema.parse(run.result) : op.stage === "reviewing" ? contractReviewSchema.parse(run.result) : op.stage === "planning" ? decisionSchema.parse(run.result)
           : op.stage === "verifying" ? verificationSchema.parse(run.result) : run.result;
         if (op.stage === "verifying") {
           const evidence = (result as ReturnType<typeof verificationSchema.parse>).evidence;
@@ -209,44 +226,75 @@ export class GoalManager {
             const file = isAbsolute(item.artifact) ? item.artifact : resolve(goal.directory, item.artifact);
             if (!item.artifact || !(await stat(file).catch(() => undefined))?.isFile()) item.met = false;
           }
-          fingerprint = await this.request(() => this.fingerprint(goal.directory), 30_000);
+          fingerprint = await this.request(signal => this.fingerprint(goal.directory, signal), 120_000, "workspace fingerprint");
         }
       } catch (error) { problem = errorText(error); }
     } else if (valid) problem = [run.error, ...run.agents.filter(agent => agent.error).map(agent => agent.error)].filter(Boolean).join("; ") || `Workflow ${run.status}; unfinished or skipped work remains unverified.`;
     const next = this.store.change(goal.id, "settled", current => {
       if (!this.store.owns(this.owner, this.now()) || current.operation?.id !== op.id) return false;
       delete current.operation;
-      current.lastRunID = run.id;
+      this.permissionChecks.delete(run.id);
+      if (run.goal?.objectiveRevision === current.objectiveRevision) {
+        current.lastRunID = run.id;
+        if (op.stage === "executing") current.lastExecutionRunID = run.id;
+        if (op.stage === "executing") current.lastExecutionResult = JSON.stringify({ runID: run.id, status: run.status,
+          result: run.result, error: run.error, agents: run.agents.map(agent => ({ label: agent.label, status: agent.status, error: agent.error })) }).slice(0, 24_000);
+      }
       for (const key of ["input", "output", "reasoning", "cost"] as const) current.usage[key] += run.usage[key];
       if (current.mode !== "active" || current.generation !== op.generation) return;
-      if (run.status === "aborted" && !/Plugin disposed|Goal dispatch cancelled|ownership changed|Goal supervisor interrupted/.test(run.error ?? "")) {
+      const internalStop = run.stopReason === "supervisor" || run.stopReason === "shutdown"
+        || /Plugin disposed|Goal dispatch cancelled|ownership changed|Goal supervisor interrupted/i.test([run.error, ...run.agents.map(agent => agent.error)].join("; "));
+      if (run.status === "aborted" && !internalStop) {
         current.mode = "paused"; current.generation++; current.reason = "Goal-owned work was stopped. Resume explicitly to continue."; return;
       }
       if (problem) {
         current.evidence = []; current.reason = problem.slice(0, 8000);
-        current.stage = current.criteria.length ? "planning" : "defining";
+        current.stage = current.criteria.length ? "planning" : current.draftContract ? "reviewing" : "defining";
         current.failures++;
         current.nextWakeAt = this.now() + this.backoff(current.failures);
-        if (/permission.{0,80}(?:denied|reject)|(?:denied|reject).{0,80}permission|authorization required|could not confirm child abort/i.test(problem)) {
+        const detail = run.agents.find(agent => agent.failure)?.failure ?? executionFailure(problem, this.now());
+        if (detail?.kind === "quota" || detail?.kind === "rate_limit") {
+          current.nextWakeAt = Math.max(current.nextWakeAt, detail.retryAt ?? this.now() + (detail.kind === "quota" ? 300_000 : 60_000));
+          current.waiting = { kind: detail.kind, since: this.now(), until: current.nextWakeAt, failure: detail };
+          this.queueNotice(current, `${detail.kind}:${detail.message}`);
+        } else {
+          current.waiting = { kind: "retry", since: this.now(), until: current.nextWakeAt };
+          this.queueNotice(current, `failure:${problem.slice(0, 200)}`);
+        }
+        if (detail && ["permission", "authentication", "configuration", "output_limit"].includes(detail.kind)
+          || /authorization required|could not confirm child abort|Pinned goal specification changed/i.test(problem)) {
           current.mode = "blocked"; current.notification = "pending";
+          current.waiting = undefined;
         }
         return;
       }
-      current.failures = 0; current.nextWakeAt = 0; current.reason = undefined;
+      current.failures = 0; current.nextWakeAt = 0; current.reason = undefined; current.waiting = undefined;
       if (op.stage === "defining") {
         const contract = result as ReturnType<typeof contractSchema.parse>;
-        current.criteria = [...new Set(contract.criteria)]; current.summary = contract.summary; current.stage = "verifying";
+        const issues = contractContamination(current.objective, contract.criteria);
+        if (issues.length) { this.rejectContract(current, issues); return; }
+        current.draftContract = { ...contract, criteria: [...new Set(contract.criteria)] };
+        current.summary = "Draft acceptance criteria prepared; checking their fidelity independently.";
+        current.stage = "reviewing";
+      } else if (op.stage === "reviewing") {
+        const review = result as ReturnType<typeof contractReviewSchema.parse>;
+        if (!review.approved || review.issues.length || !current.draftContract) {
+          this.rejectContract(current, review.issues.length ? review.issues : [review.summary]); return;
+        }
+        current.criteria = current.draftContract.criteria; current.summary = current.draftContract.summary;
+        current.draftContract = undefined; current.contractRejections = 0; current.stage = "verifying";
       } else if (op.stage === "planning") {
         const decision = result as ReturnType<typeof decisionSchema.parse>;
         current.summary = decision.summary;
         if (decision.decision === "workflow" && decision.plan) { current.plan = decision.plan; current.stage = "executing"; }
         else if (decision.decision === "verify") current.stage = "verifying";
-        else if (decision.decision === "blocked") {
-          current.mode = "blocked"; current.reason = decision.reason || "The planner requires user input."; current.notification = "pending";
+        else if (decision.decision === "blocked" && decision.question.trim()) {
+          current.mode = "blocked"; current.reason = `${decision.reason}\n${decision.question}`; current.notification = "pending";
         } else { current.reason = decision.reason || "Waiting for a useful next step."; current.nextWakeAt = this.now() + 30_000; }
       } else if (op.stage === "executing") {
         current.summary = `Workflow ${current.cycle} finished; checking all goal criteria independently.`;
         current.plan = undefined; current.evidence = []; current.stage = "verifying";
+        if ((current.lastNoticeAt ?? current.createdAt) + 60_000 < this.now()) this.queueNotice(current, `workflow:${current.cycle}`);
       } else {
         const verification = result as ReturnType<typeof verificationSchema.parse>;
         current.summary = verification.summary;
@@ -255,8 +303,9 @@ export class GoalManager {
         current.evidence = exact && fresh ? verification.evidence : [];
         if (exact && fresh && verification.evidence.every(item => item.met && item.artifact.trim()) && !verification.blocker) {
           current.mode = "completed"; current.verifiedAt = this.now(); current.fingerprint = fingerprint; current.notification = "pending";
-        } else if (verification.blocker) {
-          current.mode = "blocked"; current.reason = verification.blocker; current.notification = "pending";
+        } else if (verification.blocker && (verification.blockerKind === "permission"
+          || verification.blockerKind === "user_input" && verification.question.trim())) {
+          current.mode = "blocked"; current.reason = `${verification.blocker}${verification.question ? `\n${verification.question}` : ""}`; current.notification = "pending";
         } else {
           current.stage = "planning";
           current.reason = !fresh ? "Workspace inputs changed during verification; fresh checks are required." : !exact ? "Verification did not cover every criterion exactly once." : "Some acceptance criteria remain unmet or lack evidence.";
@@ -281,11 +330,50 @@ export class GoalManager {
     if (since === undefined) { this.reconciliation.set(run.id, this.now()); return false; }
     return this.now() - since >= 2000; // Observe delayed prompt startup before replacing interrupted work.
   }
+  private async permissionWait(goal: GoalState) {
+    const op = goal.operation!;
+    if ((this.permissionChecks.get(op.runID) ?? 0) + 3000 > this.now()) return;
+    this.permissionChecks.set(op.runID, this.now());
+    try {
+      const run = await this.runs.get(op.runID);
+      const owned = new Set(run.agents.map(agent => agent.sessionID).filter(Boolean));
+      if (!owned.size) return;
+      const directories = [...new Set(run.agents.map(agent => agent.directory ?? run.directory))];
+      const pending = (await Promise.all(directories.map(directory => this.request(signal => this.client.permission.list({ directory }, { signal, throwOnError: true }), 3000, "permission status"))))
+        .flatMap(response => response.data).find(permission => owned.has(permission.sessionID));
+      const next = this.store.change(goal.id, pending ? "approval-required" : "approval-cleared", current => {
+        if (current.mode !== "active" || current.generation !== op.generation || current.operation?.id !== op.id || !this.store.owns(this.owner, this.now())) return false;
+        if (!pending) {
+          if (current.waiting?.kind !== "permission") return false;
+          current.waiting = undefined; current.reason = undefined; return;
+        }
+        if (current.waiting?.permission?.id === pending.id) return false;
+        current.waiting = { kind: "permission", since: this.now(), permission: { id: pending.id, name: pending.permission, sessionID: pending.sessionID } };
+        current.reason = `Waiting for your ${pending.permission} approval in child ${pending.sessionID} (request ${pending.id}). Approve or deny it in OpenCode; no replacement worker will be started while approval is pending.`;
+        this.queueNotice(current, `permission:${pending.id}`);
+      }, pending ? { id: pending.id, permission: pending.permission, sessionID: pending.sessionID } : undefined, this.now());
+      if (next) await this.publish(next);
+    } catch { /* Unavailable permission-status APIs cannot bypass permissions or stop a healthy worker. */ }
+  }
   private backoff(failures: number) { return Math.min(60_000, 1000 * 2 ** Math.min(6, Math.max(0, failures - 1))); }
+  private queueNotice(goal: GoalState, key: string) {
+    if (goal.lastNoticeKey === `${goal.mode}:${key}` && (goal.lastNoticeAt ?? 0) + 600_000 > this.now()) return;
+    goal.notification = "pending"; goal.noticeKey = key;
+  }
+  private rejectContract(goal: GoalState, issues: string[]) {
+    goal.contractRejections = (goal.contractRejections ?? 0) + 1;
+    goal.draftContract = undefined; goal.criteria = []; goal.stage = "defining";
+    goal.reason = `Acceptance contract rejected: ${issues.join("; ")}`.slice(0, 8000);
+    goal.nextWakeAt = this.now() + this.backoff(goal.contractRejections);
+    this.queueNotice(goal, "contract-rejected");
+    if (goal.contractRejections >= 3) { goal.mode = "blocked"; goal.reason += " The coordinator repeatedly generated invalid requirements; review its configuration before resuming."; }
+  }
   private defer(id: string, reason: string, generation: number) {
     this.store.change(id, "waiting", goal => {
       if (this.closing || !this.store.owns(this.owner, this.now()) || goal.mode !== "active" || goal.generation !== generation) return false;
       goal.failures++; goal.reason = reason.slice(0, 8000); goal.nextWakeAt = this.now() + this.backoff(goal.failures);
+      goal.waiting = { kind: "retry", since: this.now(), until: goal.nextWakeAt };
+      this.queueNotice(goal, `waiting:${reason.slice(0, 200)}`);
       if (!goal.operation && goal.stage === "executing") { goal.stage = "planning"; goal.plan = undefined; }
     }, { reason }, this.now());
   }
@@ -301,22 +389,24 @@ export class GoalManager {
     } catch { /* Local durable state remains authoritative, even if the display cache is unavailable. */ }
   }
   private async notify(goal: GoalState) {
+    const key = `${goal.mode}:${goal.noticeKey ?? ""}`;
     try {
       const { data: statuses } = await this.request(signal => this.client.session.status({ directory: goal.directory }, { signal, throwOnError: true }), 5000);
       if (statuses[goal.sessionID] && statuses[goal.sessionID]!.type !== "idle") return;
       const reserved = this.store.change(goal.id, "notification", current => {
-        if (!this.store.owns(this.owner, this.now()) || this.closing || current.notification !== "pending" || current.generation !== goal.generation) return false;
+        if (!this.store.owns(this.owner, this.now()) || this.closing || current.notification !== "pending" || current.generation !== goal.generation || `${current.mode}:${current.noticeKey ?? ""}` !== key) return false;
         current.notification = "sending";
+        current.lastNoticeAt = this.now(); current.lastNoticeKey = key;
       }, undefined, this.now());
       if (!reserved) return;
       await this.request(signal => this.client.session.promptAsync({ sessionID: goal.sessionID, directory: goal.directory, agent: goal.agent, model: goal.model,
         variant: goal.model.variant, parts: [{ type: "text", synthetic: true, metadata: { [goalResultKey]: goal.id },
-          text: `Workflow goal update (task data):\n${goalSummary(goal)}\n${JSON.stringify(goal.evidence)}\nReport this state to the user. Do not start new workflows or continue a completed/blocked goal. Use /workflow-goal for controls.` }],
+          text: `Workflow goal update (task data):\n${goalSummary(goal)}\n${JSON.stringify(goal.evidence)}\nReport this state and any retry time or concrete question to the user. An active waiting goal will be continued by its supervisor; do not run another loop, poll, or independently implement. A blocked goal needs the stated user/configuration action. Do not continue a completed goal. Use /workflow-goals for controls.` }],
       }, { signal, throwOnError: true }), 5000);
-      this.store.change(goal.id, "notified", current => { if (current.generation !== goal.generation) return false; current.notification = "delivered"; }, undefined, this.now());
+      this.store.change(goal.id, "notified", current => { if (current.generation !== goal.generation || `${current.mode}:${current.noticeKey ?? ""}` !== key) return false; current.notification = "delivered"; }, undefined, this.now());
     } catch (error) {
       this.store.change(goal.id, "notification-uncertain", current => {
-        if (current.notification !== "sending") return false;
+        if (current.notification !== "sending" || current.generation !== goal.generation || `${current.mode}:${current.noticeKey ?? ""}` !== key) return false;
         current.notification = "uncertain";
       }, { error: errorText(error) }, this.now());
     }

@@ -2,6 +2,7 @@ import type { ModelSelection } from "../models";
 import type { PreparedWorkflowPlan } from "../plan";
 import type { UltracodeRequest } from "../ultracode";
 import type { GoalOperation } from "../goal/state";
+import type { ExecutionFailure } from "./failure";
 
 export type Usage = { input: number; output: number; reasoning: number; cost: number };
 export const emptyUsage = (): Usage => ({ input: 0, output: 0, reasoning: 0, cost: 0 });
@@ -9,6 +10,7 @@ export type AgentState = {
   id: string; sequence: number; label: string; phase?: string; model: string;
   status: "queued" | "running" | "completed" | "failed" | "skipped" | "cached";
   sessionID?: string; directory?: string; usage: Usage; error?: string; attempts?: number;
+  failure?: ExecutionFailure;
   taskId?: string; selectionReason?: string; agentType?: string;
 };
 export type RunState = {
@@ -21,4 +23,5 @@ export type RunState = {
   plan?: PreparedWorkflowPlan;
   ultracode?: UltracodeRequest;
   goal?: { id: string; objectiveRevision: number; operation: GoalOperation };
+  stopReason?: "user" | "supervisor" | "shutdown";
 };

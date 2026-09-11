@@ -4,6 +4,7 @@ import { isServer } from "solid-js/web";
 import type { TuiPluginApi, TuiSlotPlugin } from "@opencode-ai/plugin/tui";
 import { registerWorkflowSidebar } from "../src/tui-sidebar";
 import type { RunView } from "../src/tui/sidebar-state";
+import type { GoalState } from "../src/core/goal/state";
 
 /**
  * Real OpenTUI renderer, using deterministic state; no model or user config.
@@ -19,6 +20,7 @@ if (isServer) {
 }
 let slot!: NonNullable<TuiSlotPlugin["slots"]["sidebar_content"]>;
 let metadata: RunView | undefined;
+let goal: GoalState | undefined;
 let opens = 0;
 const disposals: Array<() => void> = [];
 const api = {
@@ -26,7 +28,8 @@ const api = {
   slots: { register: (plugin: TuiSlotPlugin) => { slot = plugin.slots.sidebar_content!; return "workflow.sidebar"; } },
   lifecycle: { onDispose: (dispose: () => void) => { disposals.push(dispose); return () => {}; } },
 } as unknown as TuiPluginApi;
-registerWorkflowSidebar(api, { source: () => ({ metadata: () => metadata }), open: () => { opens++; }, showAll: () => { opens++; } });
+registerWorkflowSidebar(api, { source: () => ({ metadata: () => metadata }), goal: () => goal,
+  open: () => { opens++; }, showAll: () => { opens++; }, openGoal: () => { opens++; } });
 const screen = await testRender(() => slot({ theme: api.theme }, { session_id: "session" }) as never, { width: 42, height: 35 });
 async function waitFor(text: string) {
   const deadline = Date.now() + 5000;
@@ -65,8 +68,24 @@ try {
   const completed = await waitFor("2/2 agents finished");
   assert(completed.includes("✓ completed"));
   assert(!completed.includes("running"));
+  goal = {
+    version: 1, id: "goal_demo", directory: "/isolated", sessionID: "session", originalObjective: "Implement and verify the feature",
+    objective: "Implement and verify the feature", objectiveRevision: 1, generation: 1, mode: "active", stage: "planning",
+    createdAt: 1, updatedAt: 1, agent: "build", model: { providerID: "test", modelID: "coordinator" },
+    coordinator: { providerID: "test", modelID: "coordinator", variant: "max" }, criteria: ["Feature works", "Tests pass"],
+    cycle: 2, summary: "Waiting for provider quota reset", nextWakeAt: Date.parse("2026-09-11T14:00:00.000Z"), failures: 1,
+    evidence: [], usage: { input: 100, output: 20, reasoning: 10, cost: 0 },
+    waiting: { kind: "quota", since: 1, until: Date.parse("2026-09-11T14:00:00.000Z") },
+  };
+  const waiting = await waitFor("active · quota · planning");
+  assert(waiting.includes("0/2 checks · 2 workflow attempts"));
+  assert(waiting.includes("Retry after 2026-09-11T14:00:00.000Z"));
+  assert(waiting.includes("Supervisor: test/coordinator · max"));
+  goal = { ...goal, waiting: { kind: "supervisor offline", since: 1 } };
+  const offline = await waitFor("supervisor offline");
+  assert(!offline.includes("Retry after"));
   assert.equal(opens, 0, "Rendering must not open dialogs or submit commands");
-  console.log("✓ Real terminal sidebar renders planned tasks, live phase/model/status, and completion without opening /workflows.");
+  console.log("✓ Real terminal sidebar renders tasks, completion, coordinator model, quota retry time, and offline ownership without opening dialogs.");
 } finally {
   disposals.forEach(dispose => dispose());
   screen.renderer.destroy();

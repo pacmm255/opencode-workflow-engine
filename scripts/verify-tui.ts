@@ -281,12 +281,13 @@ try {
   fixture.setAutomaticStages();
   fixture.setToolCall("workflow_goal", { action: "start", objective: "Finish and verify the isolated goal fixture" });
   fixture.setStructuredResult((_schema, prompt) => {
+    if (prompt.includes("WORKFLOW_GOAL_CONTRACT_REVIEW")) return { approved: true, issues: [], summary: "The checklist is faithful to the fixture objective" };
     if (prompt.includes("WORKFLOW_GOAL_CONTRACT")) return { criteria: [criterion], summary: "Define goal fixture acceptance" };
-    if (prompt.includes("WORKFLOW_GOAL_PLAN")) return { decision: "workflow", summary: "Complete one fixture stage", reason: "One criterion remains", plan: {
+    if (prompt.includes("WORKFLOW_GOAL_PLAN")) return { decision: "workflow", summary: "Complete one fixture stage", reason: "One criterion remains", question: "", plan: {
       summary: "Goal fixture work", tasks: [{ id: "goalwork", label: "Goal fixture work", task: "Inspect the isolated goal fixture", reason: "Use the configured review model", model: "fixture/family/reviewer", dependsOn: [] }],
     } };
     const cycle = Number(/"cycle":(\d+)/.exec(prompt)?.[1] ?? 0);
-    return { summary: cycle ? "Goal fixture verified" : "Work remains", blocker: "", evidence: [
+    return { summary: cycle ? "Goal fixture verified" : "Work remains", blocker: "", blockerKind: "none", question: "", evidence: [
       { criterion, met: cycle >= 1, method: "Offline acceptance oracle", observation: cycle ? "PASS" : "UNMET", artifact: "goal-proof.txt" },
     ] };
   });

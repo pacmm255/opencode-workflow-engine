@@ -212,12 +212,13 @@ describe("built plugin in a real isolated OpenCode server", () => {
     fixture!.setAutomaticStages();
     fixture!.setToolCall("workflow_goal", { action: "start", objective: "Complete and verify the isolated goal fixture without unrelated changes" });
     fixture!.setStructuredResult((_schema, prompt) => {
+      if (prompt.includes("WORKFLOW_GOAL_CONTRACT_REVIEW")) return { approved: true, issues: [], summary: "The checklist covers exactly the requested fixture" };
       if (prompt.includes("WORKFLOW_GOAL_CONTRACT")) return { criteria: [criterion], summary: "Define the isolated acceptance check" };
-      if (prompt.includes("WORKFLOW_GOAL_PLAN")) return { decision: "workflow", summary: "Finish one fixture stage", reason: "Acceptance still needs another stage", plan: {
+      if (prompt.includes("WORKFLOW_GOAL_PLAN")) return { decision: "workflow", summary: "Finish one fixture stage", reason: "Acceptance still needs another stage", question: "", plan: {
         summary: "Goal fixture implementation", tasks: [{ id: "implement", label: "Goal implementation", task: "Inspect the isolated fixture; return the stage result", reason: "Connected fixture model for this bounded stage", model: "fixture/test", dependsOn: [] }],
       } };
       const cycle = Number(/"cycle":(\d+)/.exec(prompt)?.[1] ?? 0);
-      return { summary: cycle >= 2 ? "Goal fixture accepted" : "Another stage remains", blocker: "", evidence: [
+      return { summary: cycle >= 2 ? "Goal fixture accepted" : "Another stage remains", blocker: "", blockerKind: "none", question: "", evidence: [
         { criterion, met: cycle >= 2, method: "Offline current-state acceptance oracle", observation: cycle >= 2 ? "PASS" : "UNMET", artifact: "goal-proof.txt" },
       ] };
     });
@@ -239,7 +240,7 @@ describe("built plugin in a real isolated OpenCode server", () => {
       await poll("final goal notification", async () => store.current(session.id)?.notification === "delivered");
       await parentIdle(session.id);
       const rows = (await Promise.all((await readdir(runDirectory)).map(id => readRun(id).catch(() => undefined)))).filter(row => row?.sessionID === session.id);
-      expect(rows).toHaveLength(8);
+      expect(rows).toHaveLength(9);
       expect(rows.every(row => row?.goal?.id === final.id && row.notification === undefined)).toBe(true);
       expect(rows.filter(row => row?.plan)).toHaveLength(2);
       expect(rows.every(row => row?.agents.every(agent => agent.model === "fixture/test/xhigh"))).toBe(true);

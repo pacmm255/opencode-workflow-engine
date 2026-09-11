@@ -168,6 +168,36 @@ test("native goal creation drafts the singular server command without swallowing
   f.dispose();
 });
 
+test("native goal status shows offline ownership and quota waits without rewriting durable state", async () => {
+  const f = await fixture();
+  const store = new GoalStore(f.directory);
+  try {
+    const goal = store.create({ sessionID: "ses_parent", agent: "build", model: { providerID: "openai", modelID: "gpt-test" }, objective: "Verify a requested feature" });
+    await f.slash("workflow-goals"); await f.choose("status");
+    if (f.dialog?.kind !== "alert") throw new Error("Expected goal status");
+    expect(f.dialog.props.message).toContain("supervisor offline");
+    expect(store.get(goal.id)).toEqual(goal);
+    expect(store.claim("test-supervisor", Date.now(), 60_000)).toBe(true);
+    const until = Date.now() + 3_600_000;
+    store.change(goal.id, "test-quota", current => {
+      current.waiting = { kind: "quota", since: Date.now(), until };
+      current.coordinator = { providerID: "openai", modelID: "gpt-test", variant: "max" };
+    });
+    await f.slash("workflow-goals"); await f.choose("status");
+    expect(f.dialog.props.message).toContain(`quota until ${new Date(until).toISOString()}`);
+    expect(f.dialog.props.message).toContain("openai/gpt-test (max)");
+    expect(f.dialog.props.message).not.toContain("supervisor offline");
+    store.release("test-supervisor");
+    await f.slash("workflow-goals"); await f.choose("status");
+    expect(f.dialog.props.message).toContain("supervisor offline");
+    expect(store.get(goal.id)?.waiting).toMatchObject({ kind: "quota", until });
+    store.control(goal.id, "pause");
+    await f.slash("workflow-goals"); await f.choose("status");
+    expect(f.dialog.props.message).not.toContain("supervisor offline");
+    expect(f.requests).toHaveLength(0); expect(f.drafted).toHaveLength(0);
+  } finally { f.dispose(); store.close(); }
+});
+
 test("native Ultracode controls persist session preferences without chat or model calls", async () => {
   const f = await fixture();
   await f.slash("ultracode");
