@@ -17,17 +17,18 @@ function assistant(child: Child, overrides: Partial<AssistantMessage> = {}, text
 function user(child: Child): SessionMessagesResponse2[number] {
   return { info: { id: child.prompts.at(-1)!.messageID, sessionID: child.id, role: "user", time: { created: 1 }, agent: "workflow-agent", model: { providerID: "provider", modelID: "model" } }, parts: [] }
 }
-function fake(snapshot: (child: Child) => Snapshot = (child) => ({ messages: [user(child), assistant(child)] }), behavior: { abortFails?: boolean; hangStatus?: boolean; createDelayMs?: number; worktreeFails?: boolean; formatEncodingBug?: boolean | string; parentPermission?: unknown[] } = {}) {
-  const calls: { method: string; pathname: string; directory: string | null; body: any; limit: string | null }[] = []
+function fake(snapshot: (child: Child) => Snapshot = (child) => ({ messages: [user(child), assistant(child)] }), behavior: { abortFails?: boolean; hangStatus?: boolean; createDelayMs?: number; worktreeFails?: boolean; formatEncodingBug?: boolean | string; parentPermission?: unknown[]; pagination?: boolean } = {}) {
+  const calls: { method: string; pathname: string; directory: string | null; body: any; limit: string | null; before: string | null; at: number }[] = []
   const children: Child[] = []
   let aborted = 0
+  let messageBytes = 0
   let stream: ReadableStreamDefaultController<Uint8Array> | undefined
   let readyBeforeCreateReturns = false
   const emit = (event: unknown) => stream!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`))
   const client = createOpencodeClient({ baseUrl: "http://executor.test", fetch: (async (request: Request) => {
     const url = new URL(request.url)
     const body = request.method === "POST" ? await request.json().catch(() => ({})) : undefined
-    calls.push({ method: request.method, pathname: url.pathname, directory: url.searchParams.get("directory"), body, limit: url.searchParams.get("limit") })
+    calls.push({ method: request.method, pathname: url.pathname, directory: url.searchParams.get("directory"), body, limit: url.searchParams.get("limit"), before: url.searchParams.get("before"), at: Date.now() })
     if (url.pathname === "/session/ses_parent") return Response.json({ id: "ses_parent", agent: "build", permission: behavior.parentPermission ?? [] })
     if (url.pathname === "/global/event") {
       const body = new ReadableStream<Uint8Array>({ start(controller) { stream = controller; emit({ payload: { type: "server.connected", properties: {} } }) }, cancel() { stream = undefined } })
@@ -58,6 +59,12 @@ function fake(snapshot: (child: Child) => Snapshot = (child) => ({ messages: [us
     if (url.pathname.endsWith("/abort")) { aborted++; return Response.json(!behavior.abortFails) }
     if (url.pathname.endsWith("/message")) {
       const messages = snapshot(child).messages ?? []
+      if (behavior.pagination) {
+        const index = Number(url.searchParams.get("before") ?? messages.length) - 1
+        const page = index >= 0 ? [messages[index]] : []
+        messageBytes += JSON.stringify(page).length
+        return Response.json(page, { headers: index > 0 ? { "X-Next-Cursor": String(index) } : undefined })
+      }
       if (!behavior.formatEncodingBug) return Response.json(messages)
       const encodingError = () => Response.json({ name: "UnknownError", data: { message: typeof behavior.formatEncodingBug === "string" ? behavior.formatEncodingBug : 'Expected OutputFormatJsonSchema, actual {type:"json_schema"} at [0]["info"]["format"]' } }, { status: 500 })
       if (url.searchParams.get("limit") !== "1") return encodingError()
@@ -68,7 +75,7 @@ function fake(snapshot: (child: Child) => Snapshot = (child) => ({ messages: [us
     }
     throw new Error(`Unexpected request ${request.method} ${url.pathname}`)
   }) as typeof fetch })
-  return { client, calls, children, get aborted() { return aborted }, readyEarly() { readyBeforeCreateReturns = true } }
+  return { client, calls, children, get aborted() { return aborted }, get messageBytes() { return messageBytes }, readyEarly() { readyBeforeCreateReturns = true } }
 }
 const input = (client: AgentExecutionInput["client"], overrides: Partial<AgentExecutionInput> = {}): AgentExecutionInput => ({
   client, parentID: "ses_parent", directory: "/project", prompt: "Answer briefly", model: { providerID: "provider", modelID: "model" },
@@ -78,6 +85,80 @@ const input = (client: AgentExecutionInput["client"], overrides: Partial<AgentEx
 const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false }
 
 describe("agent lifecycle over the real v2 HTTP transport", () => {
+  test("incremental polling avoids repeated history downloads while accounting for every reply", async () => {
+    const payload = "x".repeat(16_384);
+    let fullHistoryBytes = 0;
+    let measuredPoll = 0;
+    const transport = fake(child => {
+      const old = Array.from({ length: 32 }, (_, index) => assistant(child, {
+        id: `msg_history_${String(index).padStart(3, "0")}`, time: { created: index + 2, completed: index + 3 }, finish: "tool-calls",
+      }, index < 31 ? payload : "Working"));
+      const messages = [user(child), ...old];
+      if (child.polls >= 4) messages.push(assistant(child, { id: "msg_final", time: { created: 100, ...(child.polls >= 20 ? { completed: 101 } : {}) } }));
+      if (child.polls !== measuredPoll) { measuredPoll = child.polls; fullHistoryBytes += JSON.stringify(messages).length; }
+      return { status: child.polls < 20 ? "busy" : "idle", messages };
+    }, { pagination: true });
+    const result = await executeAgent(input(transport.client, { polling: { intervalMs: 1, maxIntervalMs: 1 } }));
+    expect(result).toMatchObject({ status: "completed", value: "done", usage: { input: 330, output: 132, reasoning: 66 } });
+    expect(transport.messageBytes).toBeLessThan(fullHistoryBytes * 0.1);
+    expect(transport.calls.filter(call => call.pathname.endsWith("/message")).every(call => call.limit === "1")).toBe(true);
+    console.log(`History resource check: ${transport.messageBytes} bytes vs ${fullHistoryBytes} bytes for full-history polling.`);
+  });
+
+  test("incremental pages retain compaction ancestry after the original prompt leaves history", async () => {
+    const transport = fake(child => {
+      const initial = assistant(child, { id: "msg_initial", finish: "tool-calls" });
+      const compact = { ...user(child), info: { ...user(child).info, id: "msg_compact", time: { created: 4 } },
+        parts: [{ id: "part_compact", messageID: "msg_compact", sessionID: child.id, type: "text" as const, text: "Continue from summary", synthetic: true }] };
+      const continued = assistant(child, { id: "msg_continued", parentID: "msg_compact", time: { created: 5, ...(child.polls >= 3 ? { completed: 6 } : {}) }, finish: "tool-calls" });
+      const replay = { ...user(child), info: { ...user(child).info, id: "msg_replay", time: { created: 7 } },
+        parts: [{ id: "part_replay", messageID: "msg_replay", sessionID: child.id, type: "text" as const, text: "Answer briefly" }] };
+      const final = assistant(child, { id: "msg_final", parentID: "msg_replay", time: { created: 8, completed: 9 } });
+      return { status: child.polls < 3 ? "busy" : "idle", messages: child.polls === 1 ? [user(child), initial]
+        : child.polls === 2 ? [user(child), initial, compact, continued] : [compact, continued, replay, final] };
+    }, { pagination: true });
+    expect(await executeAgent(input(transport.client))).toMatchObject({ status: "completed", value: "done", usage: { input: 30, output: 12, reasoning: 6 } });
+  });
+
+  test("a failed status request cannot advance the history cursor past unaccounted usage", async () => {
+    const transport = fake(child => ({ messages: [user(child), ...Array.from({ length: 3 }, (_, index) =>
+      assistant(child, { id: `msg_${index}`, time: { created: index + 2, completed: index + 3 } }))] }), { pagination: true });
+    let finishRead!: () => void;
+    const readFinished = new Promise<void>(resolve => { finishRead = resolve; });
+    const messages = transport.client.session.messages.bind(transport.client.session);
+    transport.client.session.messages = (async (...args: Parameters<typeof messages>) => {
+      const response = await messages(...args);
+      if (response.data?.some(entry => entry.info.role === "user")) setTimeout(finishRead, 0);
+      return response;
+    }) as typeof messages;
+    const status = transport.client.session.status.bind(transport.client.session);
+    let first = true;
+    transport.client.session.status = (async (...args: Parameters<typeof status>) => {
+      const response = await status(...args);
+      if (first) { first = false; await readFinished; throw new Error("status transport failed after history read"); }
+      return response;
+    }) as typeof status;
+    const result = await executeAgent(input(transport.client));
+    expect(result).toMatchObject({ status: "failed", usage: { input: 30, output: 12, reasoning: 6 } });
+    expect(result.error).toContain("status transport failed");
+    expect(transport.aborted).toBe(1);
+  });
+
+  test("quiet workers back off polling without delaying cancellation or accepting unfinished output", async () => {
+    let started = 0;
+    const transport = fake(child => {
+      started ||= Date.now();
+      const running = Date.now() - started < 180;
+      return { status: running ? "busy" : "idle", messages: [user(child), assistant(child, running ? { time: { created: 2 } } : {})] };
+    }, { pagination: true });
+    expect((await executeAgent(input(transport.client, { polling: { intervalMs: 10, maxIntervalMs: 40 } }))).status).toBe("completed");
+    expect(transport.children[0].polls).toBeLessThanOrEqual(10);
+    const cancelled = fake(child => ({ status: "busy", messages: [user(child), assistant(child, { time: { created: 2 } })] }), { pagination: true });
+    const result = await executeAgent(input(cancelled.client, { options: { timeoutMs: 60, retries: 0 }, polling: { intervalMs: 10, maxIntervalMs: 1000 } }));
+    expect(result.status).toBe("failed"); expect(result.failure).toBeUndefined();
+    expect(result.error).toContain("timed out"); expect(cancelled.aborted).toBe(1);
+  });
+
   test("format fallback remembers an unreadable older cursor without hiding new assistant updates", async () => {
     const transport = fake(child => ({ status: child.polls < 5 ? "busy" : "idle",
       messages: [user(child), assistant(child, { structured: { answer: "ok" } })] }), { formatEncodingBug: true });
@@ -277,14 +358,14 @@ describe("agent lifecycle over the real v2 HTTP transport", () => {
     const result = await executeAgent(input(transport.client, { options: { schema, retries: 0 } }))
     expect(result).toMatchObject({ status: "completed", value: { answer: "valid" }, usage: { input: 20, output: 8, reasoning: 4, cost: 0.02 } })
     expect(transport.children[0].polls).toBe(3)
-    expect(transport.calls.filter((call) => call.pathname.endsWith("/message") && call.limit === null)).toHaveLength(1)
+    expect(transport.calls.filter((call) => call.pathname.endsWith("/message") && call.limit === null)).toHaveLength(0)
     expect(transport.aborted).toBe(0)
   })
 
-  test("the compatibility fallback is restricted to native-schema children", async () => {
+  test("format encoding errors are not swallowed for children without native schemas", async () => {
     const transport = fake(undefined, { formatEncodingBug: true })
     expect(await executeAgent(input(transport.client))).toMatchObject({ status: "failed" })
-    expect(transport.calls.some((call) => call.limit === "1")).toBe(false)
+    expect(transport.calls.some((call) => call.limit === null && call.pathname.endsWith("/message"))).toBe(false)
   })
 
   test("a hanging status transport still obeys timeout and aborts the child", async () => {

@@ -1,4 +1,4 @@
-import { cpus, homedir } from "node:os";
+import { availableParallelism, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -57,7 +57,9 @@ export type ConfigScope = "project" | "global";
 export const defaultConfig: WorkflowConfig = {
   models: { allowed: [], default: "session", strict: false, aliases: {} },
   limits: {
-    maxConcurrency: Math.max(1, Math.min(16, cpus().length - 2)),
+    // CPU count alone is not a safe estimate of memory available to build/test workers.
+    // Explicit project/global overrides still select the desired concurrency.
+    maxConcurrency: Math.max(1, Math.min(2, availableParallelism() - 1)),
     maxAgents: 1000,
     maxItems: 4096,
     agentTimeoutMs: 1_800_000,

@@ -46,7 +46,9 @@ describe("configured subagent planning catalog", () => {
     expect(description).not.toContain("outside the strict pool");
   });
   test("planning chooses a task-sized team, preserves explicit choices, and requires assignment reasons", () => {
-    const guidance = planningGuidance(structuredClone(defaultConfig), models, [agent("workflow-agent")]);
+    const config = structuredClone(defaultConfig);
+    config.limits.maxConcurrency = 1;
+    const guidance = planningGuidance(config, models, [agent("workflow-agent")]);
     expect(guidance).toContain("Honor explicit user choices");
     expect(guidance).toContain("smallest sufficient team");
     expect(guidance).toContain("one focused agent can be enough");
@@ -54,6 +56,10 @@ describe("configured subagent planning catalog", () => {
     expect(guidance).toContain("brief reason explaining why");
     expect(guidance).toContain("why the additional assignment is needed");
     expect(guidance).toContain("parallelize only independent tasks");
+    expect(guidance).toContain("Per-run workflow child concurrency limit: 1.");
+    expect(guidance).toContain("Use dependsOn to serialize builds, tests, and profilers");
+    expect(guidance).toContain("Respect project-specific build/thread limits");
+    expect(guidance).toContain("resource savings never justify skipping acceptance checks");
     expect(guidance).toContain("Primary-only agents cannot");
   });
 });

@@ -42,7 +42,13 @@ export function registerWorkflowSidebar(api: TuiPluginApi, options: WorkflowSide
         createEffect(() => {
           const sessionID = props.session_id;
           setState({ runs: [], unavailable: false });
-          const refreshGoal = () => { try { setGoal(options.goal?.(sessionID)); } catch { /* Display cache only. */ } };
+          let previousGoal: string | undefined = "";
+          const refreshGoal = () => { try {
+            const next = options.goal?.(sessionID);
+            const key = JSON.stringify(next);
+            if (key === previousGoal) return;
+            previousGoal = key; setGoal(next);
+          } catch { /* Display cache only. */ } };
           untrack(refreshGoal);
           const goalTimer = setInterval(refreshGoal, 1000);
           onCleanup(() => clearInterval(goalTimer));

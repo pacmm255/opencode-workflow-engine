@@ -121,6 +121,51 @@ test("an already satisfied objective completes after fresh verification without 
   expect(f.calls.map(call => call.context.goal?.operation.stage)).toEqual(["defining", "reviewing", "verifying"]);
 });
 
+test("idle projects do not acquire or renew a supervisor lease", async () => {
+  const f = await fixture();
+  let claims = 0;
+  const claim = f.store.claim.bind(f.store);
+  f.store.claim = (...args) => { claims++; return claim(...args); };
+  for (let i = 0; i < 20; i++) { f.advance(1000); await f.manager.tick(); }
+  expect(claims).toBe(0); expect(f.store.liveOwner()).toBe(false); expect(f.requests).toHaveLength(0);
+  f.start(); await f.manager.tick(); await f.manager.tick();
+  expect(claims).toBe(1);
+});
+
+test("unchanged waiting goals do not repeatedly rewrite parent metadata", async () => {
+  const f = await fixture(); const goal = f.start();
+  f.store.change(goal.id, "test-wait", current => {
+    current.nextWakeAt = current.updatedAt + 7_200_000;
+    current.waiting = { kind: "quota", since: current.updatedAt, until: current.nextWakeAt };
+  });
+  await f.manager.tick();
+  const patches = () => f.requests.filter(request => request.body?.metadata).length;
+  const before = patches();
+  for (let i = 0; i < 50; i++) { f.advance(1000); await f.manager.tick(); }
+  expect(patches() - before).toBeLessThanOrEqual(1);
+  expect(f.calls).toHaveLength(0); expect(f.store.get(goal.id)?.waiting?.kind).toBe("quota");
+});
+
+test("a delayed initial publication cannot overwrite a newer paused goal", async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const get = f.client.session.get.bind(f.client.session);
+  let reads = 0;
+  f.client.session.get = (async (...args: Parameters<typeof get>) => {
+    if (++reads === 1) await held;
+    return get(...args);
+  }) as typeof get;
+  const goal = f.start();
+  while (!reads) await Bun.sleep(1);
+  f.manager.control(goal.id, "pause");
+  await Bun.sleep(5); release();
+  for (let i = 0; i < 30 && (f.parent.metadata.workflowGoal as GoalState | undefined)?.mode !== "paused"; i++) await Bun.sleep(2);
+  expect((f.parent.metadata.workflowGoal as GoalState)?.mode).toBe("paused");
+  await Bun.sleep(5);
+  expect((f.parent.metadata.workflowGoal as GoalState)?.mode).toBe("paused");
+});
+
 test("crosses 1200 workflow cycles and simulated multi-day duration without an aggregate ceiling", async () => {
   const f = await fixture({ cycles: 1200 }); f.start();
   const final = await f.until(goal => {

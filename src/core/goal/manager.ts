@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
@@ -33,6 +33,8 @@ export class GoalManager {
   private now: () => number;
   private fingerprint: (directory: string, signal?: AbortSignal) => Promise<string>;
   private lastPublish = new Map<string, number>();
+  private published = new Map<string, { hash: string; at: number }>();
+  private publishing = new Map<string, Promise<void>>();
   private reconciliation = new Map<string, number>();
   private permissionChecks = new Map<string, number>();
   constructor(readonly client: OpencodeClient, readonly runs: RunManager, readonly store: GoalStore, readonly options: Options) {
@@ -100,11 +102,17 @@ export class GoalManager {
       throw new Error("Goal dispatch cancelled or ownership changed");
   }
   private async step() {
-    if (!this.store.claim(this.owner, this.now(), 15_000)) {
+    const candidates = this.store.runnable();
+    if (!candidates.length && !this.store.notices().length) {
+      for (const id of this.live.keys()) await this.runs.stop(id, false).catch(() => {});
+      if (this.store.owns(this.owner, this.now())) this.store.release(this.owner);
+      return;
+    }
+    // The heartbeat renews a live lease; polling need not rewrite it every second.
+    if (!this.store.owns(this.owner, this.now()) && !this.store.claim(this.owner, this.now(), 15_000)) {
       for (const id of this.live.keys()) await this.runs.stop(id, false).catch(() => {});
       return;
     }
-    const candidates = this.store.runnable();
     // Reconcile every old operation before another goal may use the project.
     const pending = candidates.filter(goal => goal.operation);
     for (const goal of pending) await this.settle(goal);
@@ -385,11 +393,29 @@ export class GoalManager {
   }
   private async publish(goal: GoalState) {
     this.lastPublish.set(goal.id, this.now());
-    try {
-      const { data: parent } = await this.request(signal => this.client.session.get({ sessionID: goal.sessionID, directory: goal.directory }, { signal, throwOnError: true }), 3000);
-      await this.request(signal => this.client.session.update({ sessionID: goal.sessionID, directory: goal.directory,
-        metadata: { ...parent.metadata, workflowGoal: goal } }, { signal, throwOnError: true }), 3000);
-    } catch { /* Local durable state remains authoritative, even if the display cache is unavailable. */ }
+    if (this.lastPublish.size > 512) this.lastPublish.delete(this.lastPublish.keys().next().value!);
+    const pending = (this.publishing.get(goal.id) ?? Promise.resolve()).then(async () => {
+      try {
+        if (this.closing) return;
+        let current = this.store.get(goal.id);
+        if (!current) return;
+        const hash = createHash("sha256").update(JSON.stringify(current)).digest("hex");
+        const previous = this.published.get(goal.id);
+        if (previous?.hash === hash && previous.at + 60_000 > this.now()) return;
+        const { data: parent } = await this.request(signal => this.client.session.get({ sessionID: goal.sessionID, directory: goal.directory }, { signal, throwOnError: true }), 3000);
+        // A control may arrive while the parent read is pending. Publish the latest
+        // durable state, and serialize updates so older requests cannot win later.
+        current = this.store.get(goal.id);
+        if (!current) return;
+        await this.request(signal => this.client.session.update({ sessionID: goal.sessionID, directory: goal.directory,
+          metadata: { ...parent.metadata, workflowGoal: current } }, { signal, throwOnError: true }), 3000);
+        this.published.set(goal.id, { hash: createHash("sha256").update(JSON.stringify(current)).digest("hex"), at: this.now() });
+        if (this.published.size > 512) this.published.delete(this.published.keys().next().value!);
+      } catch { /* Local durable state remains authoritative, even if the display cache is unavailable. */ }
+    });
+    this.publishing.set(goal.id, pending);
+    try { await pending; }
+    finally { if (this.publishing.get(goal.id) === pending) this.publishing.delete(goal.id); }
   }
   private async notify(goal: GoalState) {
     const key = `${goal.mode}:${goal.noticeKey ?? ""}`;
@@ -420,6 +446,7 @@ export class GoalManager {
     if (this.timer) clearInterval(this.timer);
     if (this.heartbeat) clearInterval(this.heartbeat);
     await this.ticking;
+    await Promise.allSettled([...this.publishing.values()]);
     // Keep active goals active on host shutdown. The next host reconciles, then verifies partial work.
     for (const id of this.live.keys()) await this.runs.stop(id, false).catch(() => {});
     await Promise.allSettled([...this.live.values()]);

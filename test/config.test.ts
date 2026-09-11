@@ -15,6 +15,12 @@ afterEach(async () => {
 });
 
 describe("workflow config", () => {
+  test("defaults are conservative without overriding explicit project concurrency", async () => {
+    expect(defaultConfig.limits.maxConcurrency).toBeGreaterThanOrEqual(1);
+    expect(defaultConfig.limits.maxConcurrency).toBeLessThanOrEqual(2);
+    const paths = await fixture();
+    expect((await saveConfig(paths.project, { limits: { maxConcurrency: 12 } }, "project", paths.global)).limits.maxConcurrency).toBe(12);
+  });
   test("missing files yield independent, complete defaults", async () => {
     const paths = await fixture();
     const first = await loadConfig(paths.project, paths.global);

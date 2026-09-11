@@ -134,8 +134,13 @@ export class RunManager {
 
   async list(sessionID?: string): Promise<RunState[]> {
     const ids = await readdir(this.root).catch(() => [] as string[]);
-    const rows = await Promise.all(ids.filter((id) => /^wf_[a-f0-9-]{36}$/.test(id)).map((id) => this.get(id).catch(() => undefined)));
-    return rows.filter((row): row is RunState => !!row && (!sessionID || row.sessionID === sessionID)).sort((a, b) => b.startedAt - a.startedAt);
+    const candidates = ids.filter(id => /^wf_[a-f0-9-]{36}$/.test(id));
+    const rows: RunState[] = [];
+    for (let offset = 0; offset < candidates.length; offset += 4) {
+      const batch = await Promise.all(candidates.slice(offset, offset + 4).map(id => this.get(id).catch(() => undefined)));
+      for (const row of batch) if (row && (!sessionID || row.sessionID === sessionID)) rows.push(row);
+    }
+    return rows.sort((a, b) => b.startedAt - a.startedAt);
   }
 
   /** Goal recovery calls this only after lease fencing and confirmed child cancellation. */
@@ -226,15 +231,26 @@ export class RunManager {
     const semaphore = new Semaphore(context.config.limits.maxConcurrency);
     const pending = new Set<Promise<unknown>>();
     let persistTail = Promise.resolve();
+    let requestedWrite = 0;
+    let written = 0;
+    let revision = 0;
+    let published = -1;
+    let publishedAt = 0;
     const persist = () => {
+      revision++;
       if (state.plan) {
         const running = [...new Set(state.agents.filter((agent) => agent.status === "running").map((agent) => agent.phase ?? agent.label))];
         state.phase = running.length ? running.slice(0, 3).join(" + ")
           : state.status !== "running" ? state.status
           : state.agents.length < state.plan.tasks.length ? "Waiting for tasks" : "Finalizing";
       }
-      const snapshot = structuredClone(state);
-      persistTail = persistTail.then(() => atomicJSON(join(state.runDir, "run.json"), snapshot));
+      const requested = ++requestedWrite;
+      persistTail = persistTail.then(async () => {
+        if (written >= requested) return;
+        const writing = requestedWrite;
+        await atomicJSON(join(state.runDir, "run.json"), structuredClone(state));
+        written = writing;
+      });
       return persistTail;
     };
     const abort = () => controller.abort(context.abort?.reason ?? failure("RunAbortedError", "Invoking session aborted"));
@@ -250,12 +266,20 @@ export class RunManager {
     let progressPending: Promise<void> | undefined;
     const progress = (): Promise<void> => {
       if (progressPending) return progressPending;
+      // Occasionally refresh shared parent metadata even when another plugin
+      // replaced its display cache without changing this durable run.
+      if (published === revision && publishedAt + 60_000 > Date.now()) return Promise.resolve();
       progressPending = (async () => { try {
+        const publishing = revision;
         const snapshot = structuredClone(state);
         if (!state.background) context.metadata?.(snapshot);
         const { data: session } = await this.request((signal) => this.client.session.get({ sessionID: state.sessionID, directory: this.directory }, { signal }));
-        if (session) await this.request((signal) => this.client.session.update({ sessionID: state.sessionID, directory: this.directory,
-          metadata: { ...session.metadata, workflow: snapshot } }, { signal }));
+        if (session) {
+          await this.request((signal) => this.client.session.update({ sessionID: state.sessionID, directory: this.directory,
+            metadata: { ...session.metadata, workflow: snapshot } }, { signal, throwOnError: true }));
+          published = publishing;
+          publishedAt = Date.now();
+        }
       } catch { /* UI progress must not fail a durable run. */ }
       finally { progressPending = undefined; } })();
       return progressPending;
@@ -266,8 +290,8 @@ export class RunManager {
         title: state.name, message, variant,
       }, { signal })).catch(() => {});
     };
-    const warn = (message: string) => { if (state.warnings.length < 1000 && !state.warnings.includes(message)) state.warnings.push(message); };
-    const recordFailure = (error: unknown) => { if (state.logs.length < 1000) state.logs.push(errorText(error).slice(0, 8000)); };
+    const warn = (message: string) => { if (state.warnings.length < 1000 && !state.warnings.includes(message)) { state.warnings.push(message); revision++; } };
+    const recordFailure = (error: unknown) => { if (state.logs.length < 1000) { state.logs.push(errorText(error).slice(0, 8000)); revision++; } };
     const callAgent = async (prompt: string, raw: Record<string, unknown>): Promise<unknown> => {
       checkAbort(controller.signal);
       this.admit?.(context);
@@ -313,6 +337,7 @@ export class RunManager {
         if (input.tokenBudget !== undefined && state.usage.output + state.usage.reasoning >= input.tokenBudget)
           throw failure("BudgetExceededError", `Output token budget ${input.tokenBudget} exhausted before dispatch`);
         row.status = "running";
+        revision++;
         await journal.append({ type: "agent.start", agentId: row.id, sequence, key, prompt, options, model, phase: row.phase });
         const result = await this.execute({ client: this.client, parentID: state.sessionID, directory: this.directory, prompt,
           options: { ...options, agentType, timeoutMs: options.timeoutMs ?? context.config.limits.agentTimeoutMs,
@@ -329,7 +354,7 @@ export class RunManager {
             await writeRow(); await persist();
             context.guard?.();
           },
-          onUsage: (delta) => { for (const key of ["input", "output", "reasoning", "cost"] as const) { row.usage[key] += delta[key]; state.usage[key] += delta[key]; } },
+          onUsage: (delta) => { for (const key of ["input", "output", "reasoning", "cost"] as const) { row.usage[key] += delta[key]; state.usage[key] += delta[key]; } revision++; },
         });
         checkAbort(signal);
         row.status = result.status; row.error = result.error; row.failure = result.failure; row.attempts = result.attempts;
@@ -360,10 +385,12 @@ export class RunManager {
           if (state.logs.length >= 1000) return;
           const value = message.slice(0, 8000);
           state.logs.push(value);
+          revision++;
           void journal.append({ type: "log", message: value }).catch((error) => controller.abort(error));
         },
         onPhase: (title) => {
           state.phase = title;
+          revision++;
           if (!state.phases.includes(title)) state.phases.push(title);
           void journal.append({ type: "phase", title, agents: state.agents.length }).catch((error) => controller.abort(error));
         },
@@ -391,7 +418,7 @@ export class RunManager {
         await atomicJSON(join(state.runDir, "result.json"), state.result ?? null);
         await journal.append({ type: state.status === "completed" ? "run.done" : "run.error", status: state.status, error: state.error, usage: state.usage });
         await persist();
-      } catch (error) { state.status = "failed"; state.error = `Persistence failure: ${errorText(error)}`; }
+      } catch (error) { state.status = "failed"; state.error = `Persistence failure: ${errorText(error)}`; revision++; }
       await progressPending;
       await progress();
       toast(`Workflow ${state.status}: ${state.id}`, state.status === "completed" ? "success" : "error");

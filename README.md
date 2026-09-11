@@ -279,7 +279,7 @@ Exact model IDs, aliases, unique short IDs, and variants are supported. Ambiguou
     "strict": false,
     "aliases": {}
   },
-  "limits": { "maxConcurrency": 4 },
+  "limits": { "maxConcurrency": 2 },
   "defaults": { "retries": 1 },
   "sizeGuideline": 15
 }
@@ -289,9 +289,13 @@ This example inherits the session model without restricting the pool. Choose exa
 
 Project fields override global fields. Arrays replace; aliases merge by name. In strict mode, explicit choices and explicitly selected `agentType` models must belong to the allowed pool. Aliases cannot bypass it. Inherited session and workflow defaults remain usable.
 
+Automatic concurrency is capped at two agents per run (one on a single-core allocation); explicit settings still win. Use `limits.maxConcurrency: 1` for memory-heavy builds on a shared host. This limits workflow child sessions, not the compiler processes or threads they launch, and is not a host-wide memory cap. Serialize tasks sharing build outputs with `dependsOn`.
+
 `models.default` sets the model for ordinary workflow agents. `sizeGuideline` is advisory; `limits.maxAgents` is the hard cap. A configured provider can still fail because of credentials or quota.
 
 </details>
+
+The engine reads child history incrementally, backs off unchanged busy polling from one to at most five seconds, and skips unchanged progress updates except for a once-per-minute display-cache refresh. Run-history reads use bounded batches, burst state writes are coalesced without dropping durable child-session records, and idle goal supervisors stop renewing scheduling leases. These optimizations do not lower model quality, shorten execution timeouts, or waive verification. Toolchain memory and unrelated applications still need their own resource controls.
 
 <br />
 
@@ -381,7 +385,7 @@ The tools are `workflow`, `workflow_reference`, `workflow_runs`, `workflow_saved
 
 <table>
 <tr>
-<td width="33%" align="center"><h2>365</h2><p>unit tests passed</p></td>
+<td width="33%" align="center"><h2>376</h2><p>unit tests passed</p></td>
 <td width="33%" align="center"><h2>14</h2><p>real-server integration tests</p></td>
 <td width="33%" align="center"><h2>1.18.30</h2><p>OpenCode version verified</p></td>
 </tr>
@@ -396,9 +400,11 @@ The integration harness starts a real OpenCode server with isolated configuratio
 <details>
 <summary><strong>Verification scope</strong></summary>
 
-Recorded on September 9, 2026 with Bun 1.4.2 and OpenCode 1.18.30. These are recorded test results, not live CI indicators.
+Unit, resource, real-server, terminal, and native-install suites were refreshed on September 11, 2026 with Bun 1.4.2 and OpenCode 1.18.30. The earlier README captures and authenticated private-GitHub installation checks were not repeated in that resource pass. These are recorded test results, not live CI indicators.
 
 Unit coverage includes model/config policy, schemas, replay, cancellation, timed-out transports, late replies, missing-worker initialization, plugin registration, native dialog APIs, and installer preservation/failure handling.
+
+Resource regressions cover bounded history reads, quiet-worker polling and cancellation, compaction ancestry, accounting after failed status requests, durable concurrent dispatch, idle lease writes, unchanged progress, display-cache recovery, and publication ordering. A 32-message, 20-poll history fixture transferred 541,932 bytes versus 10,491,689 bytes for full-history polling (about 95% less), with identical final output and usage totals. This measures fixture message-transfer volume, not total OpenCode or host RAM.
 
 Plan coverage additionally checks full-team preflight, model selection and rationale, dependency failures, exact model/variant preservation, and source-free replay. The real-server suite verifies hidden command instructions and rejection of unrelated loop-skill reads without changing ordinary sessions.
 

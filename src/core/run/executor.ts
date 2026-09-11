@@ -33,7 +33,7 @@ export interface AgentExecutionInput {
   onSession?: (sessionID: string, directory: string) => void | Promise<void>
   /** Deltas, including usage from failed attempts and aborted children. */
   onUsage?: (usage: AgentUsage) => void
-  polling?: { intervalMs?: number; startGraceMs?: number; completionGraceMs?: number; retryDelayMs?: number }
+  polling?: { intervalMs?: number; maxIntervalMs?: number; startGraceMs?: number; completionGraceMs?: number; retryDelayMs?: number }
 }
 export interface AgentExecutionResult {
   value: unknown
@@ -74,6 +74,8 @@ const abortReason = (signal: AbortSignal): Error => signal.reason instanceof Err
 // Large schemas truncate the host error before its trailing ["format"] path.
 // This exact class name, on the message-read route, identifies the encoding bug.
 const isFormatEncodingError = (error: unknown): boolean => /Expected OutputFormatJsonSchema/.test(message(error))
+const messageOrder = (a: SessionMessagesResponse2[number], b: SessionMessagesResponse2[number]) =>
+  a.info.time.created - b.info.time.created || (a.info.id < b.info.id ? -1 : a.info.id > b.info.id ? 1 : 0)
 function cancellable<T>(promise: PromiseLike<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(abortReason(signal))
   return new Promise((resolve, reject) => {
@@ -160,7 +162,7 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
   let attempts = 0
   let sessionID: string | undefined
   let sessionCreationUncertain = false
-  let paginatedMessages = false
+  let messageAnchor: string | undefined
   const unreadableCursors = new Set<string>()
   let promptSubmitted = false
   let activityObserved = false
@@ -183,39 +185,46 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
       seenUsage.set(key, next)
       if (keys.some((key) => delta[key])) input.onUsage?.(delta)
     }
+    // Advance only after accounting: a parallel status request can fail after
+    // history was read. Cleanup must still be able to collect that unseen usage.
+    // Re-read the settled boundary itself and every in-flight reply next time.
+    for (const entry of messages) {
+      if (entry.info.role === "assistant" && entry.info.time.completed === undefined) break
+      messageAnchor = entry.info.id
+    }
   }
   const readMessages = async (signal: AbortSignal, userID?: string): Promise<SessionMessagesResponse2> => {
     if (!sessionID) return []
-    if (!paginatedMessages) {
-      try {
-        return unwrap(await cancellable(client.session.messages({ sessionID, directory }, { signal }), signal)) ?? []
-      } catch (error) {
-        if (!options.schema || !isFormatEncodingError(error)) throw error
-        // OpenCode 1.18.29 can fail to encode a stored user.format class. Its
-        // cursor-page route serializes plain data, so assistant-only pages
-        // remain readable. Restrict the workaround to that exact server bug.
-        paginatedMessages = true
-      }
-    }
     const messages: SessionMessagesResponse2 = []
     const cursors = new Set<string>()
+    const newestParents = new Set<string>()
     let before: string | undefined
     while (true) {
-      if (before && unreadableCursors.has(before)) return messages
+      if (before && unreadableCursors.has(before)) break
       const response = await cancellable(client.session.messages({ sessionID, directory, limit: 1, before }, { signal }), signal)
-      if (response.error && isFormatEncodingError(response.error)) {
+      // Single-message pages also avoid OpenCode's stored user.format encoding bug.
+      // Only skip that exact encoding failure for a native-schema request.
+      if (options.schema && response.error && isFormatEncodingError(response.error)) {
         if (before) unreadableCursors.add(before)
-        return messages
+        break
       }
       const page = unwrap(response) ?? []
-      messages.push(...page)
-      if (userID && page.some((entry) => entry.info.id === userID)) return messages
+      for (const entry of [...page].sort((a, b) => messageOrder(b, a))) {
+        if (entry.info.role !== "assistant") { messages.push(entry); continue }
+        // Only the newest reply for a parent can be its final answer. Keep old
+        // accounting metadata, not megabytes of historical tool output in RAM.
+        if (newestParents.has(entry.info.parentID)) messages.push({ info: entry.info, parts: [] })
+        else { newestParents.add(entry.info.parentID); messages.push(entry) }
+      }
+      if (page.some(entry => entry.info.id === messageAnchor || entry.info.id === userID)) break
       const cursor = response.response.headers.get("X-Next-Cursor")
-      if (!cursor || !page.length) return messages
+      if (!cursor || !page.length) break
       if (cursors.has(cursor)) throw new AgentFailedError("OpenCode repeated a message pagination cursor")
       cursors.add(cursor)
       before = cursor
     }
+    messages.sort(messageOrder)
+    return messages
   }
   const stop = async (): Promise<boolean> => {
     if (!sessionID) return !sessionCreationUncertain
@@ -264,8 +273,9 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
     failure = undefined
     sessionID = undefined
     sessionCreationUncertain = false
-    paginatedMessages = false
+    messageAnchor = undefined
     unreadableCursors.clear()
+    seenUsage.clear()
     promptSubmitted = false
     activityObserved = false
     directory = input.directory
@@ -317,6 +327,12 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
         const started = Date.now()
         let incompleteSince: number | undefined
         let final: { info: AssistantMessage; parts: Part[] } | undefined
+        let last: { info: AssistantMessage; parts: Part[] } | undefined
+        const parents = new Set([userID])
+        let accepted = false
+        let previousActivity = ""
+        let quietPolls = 0
+        const maxInterval = input.polling?.maxIntervalMs ?? Math.max(interval, Math.min(5000, interval * 5))
         while (!final) {
           const [statusResponse, messages] = await cancellable(Promise.all([
             client.session.status({ directory }, { signal }),
@@ -327,15 +343,16 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
           signal.throwIfAborted()
           const status = statuses?.[sessionID]
           if (status && status.type !== "idle") activityObserved = true
-          const ordered = [...messages].sort((a, b) => a.info.time.created - b.info.time.created || (a.info.id < b.info.id ? -1 : a.info.id > b.info.id ? 1 : 0))
+          const ordered = messages
           const userIndex = ordered.findIndex((entry) => entry.info.role === "user" && entry.info.id === userID)
-          const parents = new Set([userID])
-          let last: { info: AssistantMessage; parts: Part[] } | undefined
-          if (userIndex !== -1 || paginatedMessages) for (const [index, entry] of ordered.entries()) {
+          if (userIndex !== -1) accepted = true
+          for (const [index, entry] of ordered.entries()) {
             // Compaction may add a synthetic continuation or replay our exact
             // one-part prompt under a new user ID. Both remain our turn.
-            if ((userIndex >= 0 ? index > userIndex : !!last) && entry.info.role === "user" && entry.parts.length && (entry.parts.every((part) => part.type === "text" && part.synthetic) || (entry.parts.length === 1 && entry.parts[0].type === "text" && entry.parts[0].text === prompt))) parents.add(entry.info.id)
-            if (entry.info.role === "assistant" && parents.has(entry.info.parentID)) last = { info: entry.info, parts: entry.parts }
+            if ((userIndex >= 0 ? index > userIndex : accepted || !!last) && entry.info.role === "user" && entry.parts.length && (entry.parts.every((part) => part.type === "text" && part.synthetic) || (entry.parts.length === 1 && entry.parts[0].type === "text" && entry.parts[0].text === prompt))) parents.add(entry.info.id)
+            if (entry.info.role === "assistant" && parents.has(entry.info.parentID)
+              && (!last || entry.info.time.created > last.info.time.created || entry.info.time.created === last.info.time.created && entry.info.id >= last.info.id))
+              last = { info: entry.info, parts: entry.parts }
           }
           if (last) {
             activityObserved = true
@@ -351,13 +368,19 @@ export async function executeAgent(input: AgentExecutionInput): Promise<AgentExe
           if (!status || status.type === "idle") {
             if (last?.info.time.completed !== undefined && (last.info.finish !== "tool-calls" || last.info.error || last.info.structured !== undefined)) final = last
             else if (!last) {
-              if (Date.now() - started >= startGrace) throw new AgentFailedError(userIndex === -1 ? "Child stayed idle without accepting the prompt (check agent/model configuration)" : "Child stayed idle without an assistant reply")
+              if (Date.now() - started >= startGrace) throw new AgentFailedError(!accepted ? "Child stayed idle without accepting the prompt (check agent/model configuration)" : "Child stayed idle without an assistant reply")
             } else {
               incompleteSince ??= Date.now()
               if (Date.now() - incompleteSince >= completionGrace) throw new AgentFailedError("Child became idle without completing its final assistant message")
             }
           } else incompleteSince = undefined
-          if (!final) await delay(interval, signal)
+          if (!final) {
+            const activity = JSON.stringify([status?.type, last?.info.id, last?.info.time.completed, last?.info.tokens,
+              last?.parts.map(part => part.type === "text" || part.type === "reasoning" ? part.text.length : part.type === "tool" ? part.state.status : part.type)])
+            quietPolls = activity === previousActivity && status?.type !== "idle" && status !== undefined ? quietPolls + 1 : 0
+            previousActivity = activity
+            await delay(Math.min(maxInterval, interval * 2 ** Math.min(quietPolls, 3)), signal)
+          }
         }
         if (final.info.finish === "length" && final.info.error?.name !== "MessageAbortedError")
           throw new AgentFailedError("Model reached its output length limit before completing the task")

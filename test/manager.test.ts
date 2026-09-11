@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { afterEach, describe, expect, spyOn, test } from "bun:test"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { randomUUID } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
@@ -69,6 +70,62 @@ async function fixture(execute?: (input: AgentExecutionInput, index: number) => 
 }
 
 describe("durable workflow run manager", () => {
+  test("run discovery limits simultaneous disk reads and still returns all matching runs", async () => {
+    const f = await fixture();
+    for (let index = 0; index < 24; index++) {
+      const id = `wf_${randomUUID()}`;
+      const runDir = join(f.root, id);
+      await mkdir(runDir, { recursive: true });
+      await writeFile(join(runDir, "run.json"), JSON.stringify({ id, runDir, directory: f.directory, sessionID: index % 2 ? "other" : "ses_parent", startedAt: index, status: "completed" }));
+    }
+    let concurrent = 0; let peak = 0;
+    const get = f.manager.get.bind(f.manager);
+    f.manager.get = async id => {
+      peak = Math.max(peak, ++concurrent);
+      try { await Bun.sleep(2); return await get(id); } finally { concurrent--; }
+    };
+    const rows = await f.manager.list("ses_parent");
+    expect(rows).toHaveLength(12); expect(rows[0]?.startedAt).toBe(22); expect(peak).toBeLessThanOrEqual(4);
+  });
+
+  test("quiet runs publish only changes while usage and completion still reach the parent", async () => {
+    const gate = deferred();
+    let current: AgentExecutionInput | undefined;
+    const f = await fixture(async input => { current = input; await gate.promise; return success("done"); });
+    f.context.config.limits.runTimeoutMs = 10_000;
+    // The artificial wall-clock jump must not trip the independent worker liveness guard.
+    f.context.config.limits.scriptIdleTimeoutMs = 120_000;
+    const run = await f.manager.start({ script: "return await agent('work')" }, f.context);
+    const updates = () => f.requests.filter(request => request.method === "PATCH");
+    try {
+      await until(() => !!current && updates().length === 1);
+      await Bun.sleep(1250);
+      expect(updates()).toHaveLength(1);
+      delete (f.parent.metadata as Record<string, unknown>).workflow;
+      const now = Date.now;
+      const clock = spyOn(Date, "now").mockImplementation(() => now() + 61_000);
+      try { await until(() => updates().length === 2); }
+      finally { clock.mockRestore(); }
+      expect(f.parent.metadata).toHaveProperty("workflow.status", "running");
+      current!.onUsage?.(usage(5, 2));
+      await until(() => updates().length === 3);
+      gate.resolve(); const done = await run.done;
+      expect(done.status).toBe("completed"); expect(updates()).toHaveLength(4);
+      expect(updates().at(-1)?.body.metadata.workflow).toMatchObject({ status: "completed", usage: { output: 5, reasoning: 2 } });
+    } finally { gate.resolve(); await run.done; }
+  }, 10_000);
+
+  test("coalesced run snapshots preserve every queued child and its durable session before execution", async () => {
+    const f = await fixture(async input => {
+      const saved = JSON.parse(await readFile(join(f.root, input.workflow!.runId, "run.json"), "utf8"));
+      expect(saved.agents.find((row: { id: string }) => row.id === input.workflow!.agentId)?.sessionID).toBeTruthy();
+      return success(input.prompt);
+    });
+    const done = await (await f.manager.start({ script: "return await parallel(Array.from({length:24},(_,i)=>()=>agent('item '+i)))" }, f.context)).done;
+    expect(done.status).toBe("completed"); expect(done.agents).toHaveLength(24);
+    expect(done.agents.every(row => row.status === "completed")).toBe(true);
+    expect(JSON.parse(await readFile(join(done.runDir, "run.json"), "utf8")).agents).toEqual(done.agents);
+  });
   test("journals a child session before dispatch and preserves parent metadata", async () => {
     let observed: RunState | undefined
     const run = await fixture(async (input) => {
